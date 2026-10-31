@@ -17,7 +17,7 @@ const roomMemberSchema = new mongoose.Schema({
   },
   // Set when the student leaves (or navigates away from) the room. The row itself is kept so a
   // rejoin restores the same admission + attendance decision instead of being re-evaluated from
-  // scratch - a reconnecting student must not land back in the lobby or be marked very late.
+  // scratch - a reconnecting student must not lose their place or have their arrival re-timed.
   leftAt: { type: Date, default: null },
   // --- Waiting room state ----------------------------------------------------------------
   // 'admitted' = allowed into the live participant channel. This is ALSO the effective default
@@ -33,11 +33,11 @@ const roomMemberSchema = new mongoose.Schema({
   admittedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
   // --- Attendance ------------------------------------------------------------------------
   // 'pending' until the student is admitted / the room ends. At admission (or room end for
-  // non-waiting rooms) this becomes on_time / late / very_late. The AttendanceLedger snapshot
-  // is written when the room ends (services/attendanceLedger.js).
+  // non-waiting rooms) this becomes on_time / late. The AttendanceLedger snapshot is written when
+  // the room ends (services/attendanceLedger.js).
   attendanceStatus: {
     type: String,
-    enum: ['pending', 'on_time', 'late', 'very_late', 'absent', 'excused'],
+    enum: ['pending', 'on_time', 'late', 'absent', 'excused'],
     default: 'pending'
   },
   attendanceMarkedAt: { type: Date, default: null }

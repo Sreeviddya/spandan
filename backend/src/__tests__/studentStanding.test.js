@@ -9,7 +9,6 @@ import AttendanceLedger from '../models/AttendanceLedger.js'
 import StudentStanding from '../models/StudentStanding.js'
 import User from '../models/User.js'
 import { processRoomAttendance, getStudentAttendanceSummary } from '../services/attendanceLedger.js'
-import { clearSpurtiCache } from '../services/spurtiLive.js'
 import {
   STARTING_SP,
   STARTING_ATTENDANCE_MINUTES,
@@ -56,7 +55,6 @@ async function makeRoom({ code, startMin, durationMin = 35, penalty = 10 }) {
       waitingRoomEnabled: true,
       scheduledStartAt: min(startMin),
       graceMinutes: 5,
-      lateWindowMinutes: 15,
       latePenaltySp: penalty
     }
   })
@@ -112,10 +110,9 @@ describe('room settlement', () => {
     expect(unchanged.attendanceMinutes).toBe(STARTING_ATTENDANCE_MINUTES + 35)
   })
 
-  it('charges late 1x, very_late 2x and absent 3x of the room SP setting', async () => {
+  it('charges late 1x and absent 3x of the room SP setting', async () => {
     const cases = [
       { status: 'late', code: 'LATE1', expectedPenalty: 10 },
-      { status: 'very_late', code: 'VLATE1', expectedPenalty: 20 },
       { status: 'absent', code: 'ABS1', expectedPenalty: 30 }
     ]
     for (const c of cases) {
@@ -187,73 +184,22 @@ describe('room settlement', () => {
     expect(summary.currentLateStreak).toBe(2)
   })
 
-  it('shows Spurti live SP and attendance when the mirror is configured, without touching local balances', async () => {
-    const email = 'mirror.student@example.com'
-    const user = await User.create({ name: 'Mirror Student', email, password: 'secret123', role: 'student' })
-    const savedEnv = {
-      email: process.env.SPURTI_ADMIN_EMAIL,
-      token: process.env.SPURTI_ADMIN_TOKEN
-    }
-    process.env.SPURTI_ADMIN_EMAIL = 'admin@example.com'
-    process.env.SPURTI_ADMIN_TOKEN = 'secret'
-    clearSpurtiCache()
-    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({
-        sessions: [{ label: 'S1' }],
-        students: [{ email, totalSp: 4321, cells: { S1: { minutes: 123 } } }]
-      })
-    })
-
-    try {
-      const summary = await getStudentAttendanceSummary(user._id)
-      expect(summary.source).toBe('spurti')
-      expect(summary.spBalance).toBe(4321)
-      expect(summary.attendanceMinutes).toBe(123)
-      expect(summary.averageSp).toBe(4321)
-      expect(summary.liveSource).toMatchObject({ source: 'spurti', spBalance: 4321, attendanceMinutes: 123 })
-      // The local shadow is untouched and still seeded, so the mirror never rewrites Spandan data.
-      expect(summary.local.spBalance).toBe(startingSpForStudent(String(user._id)))
-      expect((await StudentStanding.findOne({ studentId: user._id })).spBalance)
-        .toBe(startingSpForStudent(String(user._id)))
-    } finally {
-      fetchSpy.mockRestore()
-      clearSpurtiCache()
-      if (savedEnv.email === undefined) delete process.env.SPURTI_ADMIN_EMAIL
-      else process.env.SPURTI_ADMIN_EMAIL = savedEnv.email
-      if (savedEnv.token === undefined) delete process.env.SPURTI_ADMIN_TOKEN
-      else process.env.SPURTI_ADMIN_TOKEN = savedEnv.token
-    }
-  })
-
-  it('falls back to local balances when Spurti has no record for the student', async () => {
+  it('reports locally settled SP and attendance minutes', async () => {
     const user = await User.create({ name: 'Local Student', email: 'local.student@example.com', password: 'secret123', role: 'student' })
-    const savedEnv = {
-      email: process.env.SPURTI_ADMIN_EMAIL,
-      token: process.env.SPURTI_ADMIN_TOKEN
-    }
-    process.env.SPURTI_ADMIN_EMAIL = 'admin@example.com'
-    process.env.SPURTI_ADMIN_TOKEN = 'secret'
-    clearSpurtiCache()
-    const fetchSpy = jest.spyOn(global, 'fetch').mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => ({ sessions: [], students: [] })
+    await StudentStanding.create({
+      studentId: user._id,
+      spBalance: 765,
+      attendanceMinutes: 432,
+      totalEarnedSp: 0,
+      sessionsAttended: 0,
+      strikes: 0,
+      backfilledAt: new Date()
     })
 
-    try {
-      const summary = await getStudentAttendanceSummary(user._id)
-      expect(summary.source).toBe('local')
-      expect(summary.liveSource).toBeNull()
-      expect(summary.spBalance).toBe(startingSpForStudent(String(user._id)))
-    } finally {
-      fetchSpy.mockRestore()
-      clearSpurtiCache()
-      if (savedEnv.email === undefined) delete process.env.SPURTI_ADMIN_EMAIL
-      else process.env.SPURTI_ADMIN_EMAIL = savedEnv.email
-      if (savedEnv.token === undefined) delete process.env.SPURTI_ADMIN_TOKEN
-      else process.env.SPURTI_ADMIN_TOKEN = savedEnv.token
-    }
+    const summary = await getStudentAttendanceSummary(user._id)
+    expect(summary.spBalance).toBe(765)
+    expect(summary.attendanceMinutes).toBe(432)
+    expect(summary.standing.spBalance).toBe(765)
+    expect(summary.standing.attendanceMinutes).toBe(432)
   })
 })

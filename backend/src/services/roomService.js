@@ -63,7 +63,6 @@ export const joinRoomByCode = async (code, studentId, { at = new Date() } = {}) 
     member,
     admitted: evaluation.admitted,
     waitingRoom: evaluation.waitingRoom,
-    watchOnly: evaluation.watchOnly,
     admissionStatus: evaluation.state,
     attendanceStatus: evaluation.attendanceStatus,
     lateMinutes: evaluation.lateMinutes,

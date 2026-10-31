@@ -15,14 +15,13 @@ const attendanceLedgerSchema = new mongoose.Schema({
     required: true
   },
   // Attendance outcome for this room.
-  //   on_time   - admitted before scheduledStartAt + graceMinutes
-  //   late      - admitted inside the late window
-  //   very_late - admitted after the late window
+  //   on_time   - arrived before scheduledStartAt + graceMinutes
+  //   late      - arrived after the grace period
   //   absent    - joined but was never admitted / never attended
   //   excused   - teacher rejected the join request (no academic penalty)
   status: {
     type: String,
-    enum: ['on_time', 'late', 'very_late', 'absent', 'excused'],
+    enum: ['on_time', 'late', 'absent', 'excused'],
     required: true
   },
   joinedAt: { type: Date, default: null },
@@ -32,7 +31,7 @@ const attendanceLedgerSchema = new mongoose.Schema({
   // SP deducted for this room. Ledger penalties are informational: the leaderboard only sums
   // live Response.points, so attendance never silently rewrites quiz scores.
   penaltySp: { type: Number, default: 0, min: 0 },
-  // Consecutive late/very_late run INCLUDING this row (1 = first late in the run).
+  // Consecutive late run INCLUDING this row (1 = first late in the run).
   consecutiveLate: { type: Number, default: 0, min: 0 },
   // True on the 3rd, 6th, 9th... consecutive late row, where the extra strike penalty applies.
   strikeTriggered: { type: Boolean, default: false },

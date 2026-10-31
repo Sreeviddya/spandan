@@ -23,15 +23,42 @@ import useGeneratedBatchCues from '../hooks/useGeneratedBatchCues'
 import { transcribeAudio, getTranscriptionStatus, convertWebMToWav } from '../services/serverTranscriptionService'
 import { requestQuestionGeneration, fetchAllRoomQuestions } from '../services/questionService'
 import { API_URL } from '../config.js'
-import { ArrowLeft, Check, Clapperboard, Copy, FileText, Hourglass, LoaderCircle, Mic as MicIcon, PenLine, RefreshCw, Settings, Timer, Trophy, Users, X } from 'lucide-react'
+import { ArrowLeft, Check, Clapperboard, Clock, Copy, FileText, Hourglass, LoaderCircle, Mic as MicIcon, PenLine, RefreshCw, Settings, Timer, Trophy, Users, X } from 'lucide-react'
 import { Ico } from '../components/icons'
+
+// Small attendance pill used by the lobby and the participants list. Only on_time / late are
+// possible for a student who actually reached the room; the extra tones cover settled rows.
+const ATTENDANCE_TONE = {
+  on_time: { label: 'On time', bg: 'var(--tint-success-bg)', fg: 'var(--tint-success-fg)' },
+  late: { label: 'Late', bg: 'var(--tint-warn-bg)', fg: 'var(--tint-warn-fg)' },
+  absent: { label: 'Absent', bg: 'var(--tint-danger-bg)', fg: 'var(--tint-danger-fg)' },
+  excused: { label: 'Excused', bg: 'var(--bg-secondary)', fg: 'var(--text-secondary)' }
+}
+
+function AttendanceTag({ status }) {
+  const tone = ATTENDANCE_TONE[status] || ATTENDANCE_TONE.on_time
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', padding: '3px 9px', borderRadius: 999,
+      background: tone.bg, color: tone.fg, fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap'
+    }}>
+      {tone.label}
+    </span>
+  )
+}
+
+const clockTime = (value) => {
+  if (!value) return '—'
+  const d = new Date(value)
+  return Number.isNaN(d.getTime()) ? '—' : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
 
 function RoomDetailPage() {
   const { roomId } = useParams()
   const navigate = useNavigate()
   const { user, token } = useAuthStore()
   const { socket, isConnected, joinRoom, leaveRoom } = useSocketStore()
-  const { getRoom, updateRoom, setAuthToken, fetchWaitingList, decideWaiting } = useRoomStore()
+  const { getRoom, updateRoom, setAuthToken, fetchWaitingList, decideWaiting, admitAllWaiting, fetchParticipants } = useRoomStore()
   const { isDark } = useThemeStore()
   const isMobile = useIsMobile()
   // Room code + participant count use a deep blue on light, but that reads too dark on the dark card;
@@ -119,11 +146,20 @@ function RoomDetailPage() {
   })
   const [totalParticipants, setTotalParticipants] = useState(0)
   const [answerCounts, setAnswerCounts] = useState({}) // questionId -> count
-  // Waiting room (manual policy): students awaiting admit/reject + their live count.
+  // Waiting room: students awaiting admit/reject + their live count. `waitingFilter` narrows the
+  // list (and therefore what a manual Admit All applies to) to on-time or late arrivals.
   const [waitingStudents, setWaitingStudents] = useState([])
   const [waitingCount, setWaitingCount] = useState(0)
+  const [waitingFilter, setWaitingFilter] = useState('all')
   const [decidingId, setDecidingId] = useState(null)
+  const [isAdmittingAll, setIsAdmittingAll] = useState(false)
   const [lobbyError, setLobbyError] = useState('')
+  const [lobbyNotice, setLobbyNotice] = useState('')
+  // Admitted-participants modal (clickable participant count).
+  const [showParticipants, setShowParticipants] = useState(false)
+  const [participants, setParticipants] = useState([])
+  const [isLoadingParticipants, setIsLoadingParticipants] = useState(false)
+  const [participantsError, setParticipantsError] = useState('')
   // Mirror of the room's chime preference for the socket handler (the listener is registered once,
   // so it reads this ref instead of capturing a stale settings object).
   const waitingChimeRef = useRef(true)
@@ -553,6 +589,7 @@ function RoomDetailPage() {
 
   const handleWaitingDecision = async (studentId, action) => {
     setLobbyError('')
+    setLobbyNotice('')
     setDecidingId(studentId)
     try {
       await decideWaiting(roomId, studentId, action)
@@ -564,6 +601,58 @@ function RoomDetailPage() {
       setLobbyError(err.message || `Failed to ${action} student`)
     } finally {
       setDecidingId(null)
+    }
+  }
+
+  // The lobby filter also decides what a MANUAL Admit All applies to. Automatic ignores the list
+  // and admits on-time arrivals only (the backend owns that rule).
+  const filteredWaiting = waitingStudents.filter((s) =>
+    waitingFilter === 'all' || s.attendanceStatus === waitingFilter
+  )
+
+  const handleAdmitAll = async () => {
+    if (isAdmittingAll) return
+    const automatic = (roomSettings?.waitingRoomPolicy || 'automatic') === 'automatic'
+    const ids = automatic ? null : filteredWaiting.map((s) => String(s.studentId))
+    if (!automatic && ids.length === 0) return
+
+    setLobbyError('')
+    setLobbyNotice('')
+    setIsAdmittingAll(true)
+    try {
+      const result = await admitAllWaiting(roomId, ids)
+      if (result?.policy === 'manual' && automatic) {
+        setRoomSettings((prev) => ({ ...prev, waitingRoomPolicy: 'manual' }))
+      }
+      const admitted = Number(result?.admittedCount || 0)
+      const skipped = Number(result?.skipped || 0)
+      if (automatic) {
+        setLobbyNotice(
+          `Admitted ${admitted} on-time student${admitted === 1 ? '' : 's'}.` +
+          (skipped > 0
+            ? ` ${skipped} later arrival${skipped === 1 ? '' : 's'} still waiting — the room is now manual.`
+            : ' The room is now manual, so later arrivals wait for you.')
+        )
+      }
+      await loadWaiting()
+    } catch (err) {
+      setLobbyError(err.message || 'Failed to admit students')
+    } finally {
+      setIsAdmittingAll(false)
+    }
+  }
+
+  const openParticipants = async () => {
+    setShowParticipants(true)
+    setParticipantsError('')
+    setIsLoadingParticipants(true)
+    try {
+      const data = await fetchParticipants(roomId)
+      setParticipants(Array.isArray(data?.participants) ? data.participants : [])
+    } catch (err) {
+      setParticipantsError(err.message || 'Failed to load participants')
+    } finally {
+      setIsLoadingParticipants(false)
     }
   }
 
@@ -1405,24 +1494,33 @@ function RoomDetailPage() {
               </button>
             </div>
 
-            {/* Live participant count — seeded on load, kept current by room:joined / room:left */}
-            <div style={{
-              display: 'flex',
-              flexDirection: 'column',
-              alignItems: 'center',
-              justifyContent: 'center',
-              gap: '4px',
-              padding: '8px 20px',
-              border: '2px solid var(--border-color)',
-              borderRadius: '10px'
-            }}>
+            {/* Live participant count — seeded on load, kept current by room:joined / room:left.
+                Clicking it opens the admitted-participants list (join order, attendance tags). */}
+            <button
+              type="button"
+              onClick={openParticipants}
+              title="Show admitted participants"
+              style={{
+                display: 'flex',
+                flexDirection: 'column',
+                alignItems: 'center',
+                justifyContent: 'center',
+                gap: '4px',
+                padding: '8px 20px',
+                border: '2px solid var(--border-color)',
+                borderRadius: '10px',
+                background: 'transparent',
+                cursor: 'pointer',
+                font: 'inherit'
+              }}
+            >
               <span style={{ fontSize: '28px', fontWeight: '700', color: codeColor }}>
                 {totalParticipants}
               </span>
               <span style={{ fontSize: '12px', color: 'var(--text-secondary)', fontWeight: '600', whiteSpace: 'nowrap' }}>
                 <Ico as={Users} /> Participants
               </span>
-            </div>
+            </button>
 
             {/* Waiting-room count — only meaningful when the lobby is enabled. */}
             {roomSettings?.waitingRoomEnabled && (
@@ -1614,42 +1712,113 @@ function RoomDetailPage() {
             )}
           </div>
 
-          {/* Waiting Room lobby (manual policy): admit/reject each waiting student. */}
-          {roomSettings?.waitingRoomEnabled && roomSettings?.waitingRoomPolicy === 'manual' && (
+          {/* Waiting Room lobby: every join waits here. Filters decide what Admit All applies to in
+              manual mode; automatic mode admits on-time arrivals and then turns the room manual. */}
+          {roomSettings?.waitingRoomEnabled && (
             <div style={{
               background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)',
               boxShadow: 'var(--shadow-md)', padding: '18px 20px', marginBottom: '20px'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: waitingStudents.length ? 14 : 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 6 }}>
                 <span style={{ display: 'inline-flex', color: 'var(--accent)' }}><Hourglass size={18} /></span>
                 <h3 style={{ margin: 0, fontSize: 16, fontWeight: 650, color: 'var(--text-primary)' }}>
                   Waiting Room {waitingStudents.length > 0 && `(${waitingStudents.length})`}
                 </h3>
-                <button onClick={loadWaiting} style={{
-                  marginLeft: 'auto', padding: '5px 12px', background: 'transparent', color: 'var(--accent)',
-                  border: '1px solid var(--accent)', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer'
-                }}>
-                  Refresh
-                </button>
+                <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <button onClick={loadWaiting} style={{
+                    padding: '5px 12px', background: 'transparent', color: 'var(--accent)',
+                    border: '1px solid var(--accent)', borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: 'pointer'
+                  }}>
+                    Refresh
+                  </button>
+                  <button
+                    onClick={handleAdmitAll}
+                    disabled={isAdmittingAll || filteredWaiting.length === 0}
+                    title={(roomSettings?.waitingRoomPolicy || 'automatic') === 'automatic'
+                      ? 'Admit every on-time student, then switch this room to manual'
+                      : 'Admit the students currently visible under the filter'}
+                    style={{
+                      padding: '6px 14px',
+                      background: 'var(--success-solid)',
+                      color: 'white',
+                      border: 'none',
+                      borderRadius: 7,
+                      fontSize: 12.5,
+                      fontWeight: 700,
+                      cursor: isAdmittingAll || filteredWaiting.length === 0 ? 'not-allowed' : 'pointer',
+                      opacity: isAdmittingAll || filteredWaiting.length === 0 ? 0.55 : 1
+                    }}
+                  >
+                    {isAdmittingAll ? 'Admitting…' : 'Admit All'}
+                  </button>
+                </div>
               </div>
+              <p style={{ margin: '0 0 12px', fontSize: 12.5, color: 'var(--text-secondary)' }}>
+                {(roomSettings?.waitingRoomPolicy || 'automatic') === 'automatic'
+                  ? 'New students wait here. Admit All lets in everyone who arrived on time (in join order); the room then switches to manual so later arrivals wait for you.'
+                  : 'Every student waits until you admit them. Admit All applies to the students currently visible under the filter.'}
+              </p>
+
+              <div role="group" aria-label="Filter waiting students" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginBottom: 12 }}>
+                {[
+                  { key: 'all', label: `All (${waitingStudents.length})` },
+                  { key: 'on_time', label: `On time (${waitingStudents.filter((s) => s.attendanceStatus === 'on_time').length})` },
+                  { key: 'late', label: `Late (${waitingStudents.filter((s) => s.attendanceStatus === 'late').length})` }
+                ].map((opt) => {
+                  const active = waitingFilter === opt.key
+                  return (
+                    <button
+                      key={opt.key}
+                      type="button"
+                      aria-pressed={active}
+                      onClick={() => setWaitingFilter(opt.key)}
+                      style={{
+                        padding: '5px 11px', borderRadius: 999, fontSize: 12, fontWeight: 600, cursor: 'pointer',
+                        border: `1px solid ${active ? 'var(--accent)' : 'var(--border-color)'}`,
+                        background: active ? 'var(--tint-info-bg)' : 'transparent',
+                        color: active ? 'var(--accent)' : 'var(--text-secondary)'
+                      }}
+                    >
+                      {opt.label}
+                    </button>
+                  )
+                })}
+              </div>
+
               {lobbyError && (
                 <p role="alert" style={{ margin: '0 0 12px', fontSize: 13, color: '#dc2626' }}>{lobbyError}</p>
               )}
+              {lobbyNotice && (
+                <p role="status" style={{ margin: '0 0 12px', fontSize: 13, color: 'var(--tint-success-fg)' }}>{lobbyNotice}</p>
+              )}
+
               {waitingStudents.length === 0 ? (
                 <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)' }}>
                   No students waiting. Students who join will appear here for you to admit.
                 </p>
+              ) : filteredWaiting.length === 0 ? (
+                <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)' }}>
+                  No {waitingFilter === 'on_time' ? 'on-time' : 'late'} students waiting. Choose another filter.
+                </p>
               ) : (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {waitingStudents.map((s) => (
+                  {filteredWaiting.map((s) => (
                     <div key={s.studentId} style={{
                       display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap',
                       padding: '10px 12px', background: 'var(--bg-primary)', borderRadius: 10, border: '1px solid var(--border-color)'
                     }}>
                       <div style={{ flex: 1, minWidth: 140 }}>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{s.name || 'Student'}</div>
-                        <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>
-                          {s.enrollmentNumber || s.email || '—'}
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{s.name || 'Student'}</span>
+                          <AttendanceTag status={s.attendanceStatus} />
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span>{s.enrollmentNumber || s.email || '—'}</span>
+                          {s.requestedAt && (
+                            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                              <Ico as={Clock} /> asked to join {clockTime(s.requestedAt)}
+                            </span>
+                          )}
                         </div>
                       </div>
                       <button
@@ -2313,6 +2482,85 @@ function RoomDetailPage() {
           onNext={handleTextQuestionClose}
           isLast={true}
         />
+      )}
+
+      {/* Admitted participants (clickable participant count). Join order, attendance tags. */}
+      {showParticipants && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Participants"
+          onClick={() => setShowParticipants(false)}
+          style={{
+            position: 'fixed', inset: 0, background: 'rgba(0, 0, 0, 0.55)',
+            display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000, padding: 16
+          }}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            style={{
+              width: '100%', maxWidth: 520, maxHeight: '80vh', display: 'flex', flexDirection: 'column',
+              background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', border: '1px solid var(--border-color)',
+              boxShadow: 'var(--shadow-lg, 0 20px 50px rgba(0,0,0,0.3))', overflow: 'hidden'
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '16px 20px', borderBottom: '1px solid var(--border-color)' }}>
+              <span style={{ display: 'inline-flex', color: 'var(--accent)' }}><Users size={18} /></span>
+              <h3 style={{ margin: 0, fontSize: 16, fontWeight: 700, color: 'var(--text-primary)' }}>
+                Participants {!isLoadingParticipants && `(${participants.length})`}
+              </h3>
+              <button
+                onClick={() => setShowParticipants(false)}
+                aria-label="Close participants"
+                style={{
+                  marginLeft: 'auto', display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+                  width: 30, height: 30, borderRadius: 8, border: '1px solid var(--border-color)',
+                  background: 'transparent', color: 'var(--text-secondary)', cursor: 'pointer'
+                }}
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div style={{ padding: '14px 20px 20px', overflowY: 'auto' }}>
+              <p style={{ margin: '0 0 12px', fontSize: 12, color: 'var(--text-secondary)' }}>
+                Admitted students, in the order they joined. Waiting students are not listed here.
+              </p>
+              {isLoadingParticipants ? (
+                <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)' }}>Loading participants…</p>
+              ) : participantsError ? (
+                <p role="alert" style={{ margin: 0, fontSize: 13, color: '#dc2626' }}>{participantsError}</p>
+              ) : participants.length === 0 ? (
+                <p style={{ margin: 0, fontSize: 13.5, color: 'var(--text-secondary)' }}>
+                  No students have been admitted yet.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {participants.map((p, index) => (
+                    <div key={p.studentId || index} style={{
+                      display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+                      padding: '9px 12px', background: 'var(--bg-primary)', borderRadius: 9, border: '1px solid var(--border-color)'
+                    }}>
+                      <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--text-secondary)', minWidth: 18 }}>{index + 1}.</span>
+                      <div style={{ flex: 1, minWidth: 120 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                          <span style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)' }}>{p.name || 'Student'}</span>
+                          <AttendanceTag status={p.attendanceStatus} />
+                        </div>
+                        <div style={{ fontSize: 12, color: 'var(--text-secondary)', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
+                          <span>{p.enrollmentNumber || p.email || '—'}</span>
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 3 }}>
+                            <Ico as={Clock} /> joined {clockTime(p.joinedAt)}
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
       )}
 
       <style>{`

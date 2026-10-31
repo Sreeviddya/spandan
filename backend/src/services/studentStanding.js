@@ -6,7 +6,7 @@
 //
 //   + points earned in that room
 //   + minutes between admission and room end (attended statuses only)
-//   - the teacher's late penalty (late 1x, very_late 2x, absent 3x)
+//   - the teacher's late penalty (late 1x, absent 3x)
 //   - on every 3rd consecutive late: the student's average SP per attended session and one
 //     "attendance day" (60 minutes)
 //
@@ -52,7 +52,7 @@ export function startingSpForStudent(studentId) {
 }
 
 // Statuses that mean the student actually attended (excused/rejected and absent earn nothing).
-export const ATTENDED_STATUSES = ['on_time', 'late', 'very_late']
+export const ATTENDED_STATUSES = ['on_time', 'late']
 
 export function computeAverageSp({ totalEarnedSp = 0, sessionsAttended = 0 } = {}) {
   const earned = Math.max(0, Number(totalEarnedSp) || 0)

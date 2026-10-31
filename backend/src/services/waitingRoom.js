@@ -1,8 +1,8 @@
 // Core waiting-room logic.
 //
 // Two kinds of helpers live here:
-//   1. Pure policy functions (no DB) - timing, admission decisions, channel names. These are what
-//      the unit tests exercise and what the socket/REST layers share, so a join is evaluated
+//   1. Pure policy functions (no DB) - timing, classification, channel names. These are what the
+//      unit tests exercise and what the socket/REST layers share, so a join is evaluated
 //      identically over HTTP and Socket.IO.
 //   2. Thin RoomMember flows (ensure/admit/reject/list) used by the routes and sockets. Keeping
 //      them beside the policy keeps the "which channel/status should this student be in" rule in
@@ -10,15 +10,25 @@
 //
 // Channel model:
 //   participants -> room.code            (live polls, leaderboard, participation)
-//   viewers      -> viewers:<room.code>  (waiting room, rejected and very-late students; read-only)
+//   viewers      -> viewers:<room.code>  (waiting room and rejected students; read-only)
+//
+// Admission model:
+//   Waiting room OFF -> every join is admitted immediately.
+//   Waiting room ON  -> every join waits in the lobby, whatever the policy. Attendance is still
+//                       classified from the student's ARRIVAL time (on_time / late) so the teacher
+//                       sees the right tag and a slow approval never changes the outcome.
+//   automatic policy -> the first Admit All admits only on-time students (in join order) and then
+//                       switches the room to manual for the rest of the session.
+//   manual policy    -> every student waits for an individual admit/reject or a filtered Admit All.
+import Room from '../models/Room.js'
 import RoomMember from '../models/RoomMember.js'
+import User from '../models/User.js'
 
 export const DEFAULT_GRACE_MINUTES = 5
-export const DEFAULT_LATE_WINDOW_MINUTES = 15
 export const DEFAULT_LATE_PENALTY_SP = 0
 
 // Attendance outcomes that count as a "late strike" for the 3-strike rule.
-export const LATE_STATUSES = ['late', 'very_late']
+export const LATE_STATUSES = ['late']
 
 export const participantsChannel = (roomCode) => String(roomCode || '')
 export const viewersChannel = (roomCode) => `viewers:${String(roomCode || '')}`
@@ -29,8 +39,8 @@ function clampInt(value, min, max, fallback) {
   return Math.min(max, Math.max(min, Math.round(n)))
 }
 
-// Grace / late window are stored in minutes but may be fractional (seconds mode in the UI sends
-// e.g. 0.5 for 30s). Round to microseconds so float division noise never leaks into comparisons.
+// Grace is stored in minutes but may be fractional (seconds mode in the UI sends e.g. 0.5 for
+// 30s). Round to microseconds so float division noise never leaks into comparisons.
 function clampMinutes(value, min, max, fallback) {
   const n = Number(value)
   if (!Number.isFinite(n)) return fallback
@@ -56,7 +66,6 @@ export function getAttendanceSettings(room) {
   return {
     scheduledStartAt: toDate(s.scheduledStartAt),
     graceMinutes: clampMinutes(s.graceMinutes, 0, 120, DEFAULT_GRACE_MINUTES),
-    lateWindowMinutes: clampMinutes(s.lateWindowMinutes, 0, 240, DEFAULT_LATE_WINDOW_MINUTES),
     latePenaltySp: clampInt(s.latePenaltySp, 0, 1000, DEFAULT_LATE_PENALTY_SP)
   }
 }
@@ -75,18 +84,16 @@ export function computeLateMinutes({ room, at = new Date() }) {
 // Classification for a join/admission time. No scheduled start = on_time (a room that never set a
 // schedule should not invent lateness).
 export function computeAttendanceStatus({ room, at = new Date() }) {
-  const { scheduledStartAt, graceMinutes, lateWindowMinutes } = getAttendanceSettings(room)
+  const { scheduledStartAt, graceMinutes } = getAttendanceSettings(room)
   const when = toDate(at) || new Date()
   if (!scheduledStartAt) return 'on_time'
   const diffMin = (when.getTime() - scheduledStartAt.getTime()) / 60000
-  if (diffMin <= graceMinutes) return 'on_time'
-  if (diffMin <= graceMinutes + lateWindowMinutes) return 'late'
-  return 'very_late'
+  return diffMin <= graceMinutes ? 'on_time' : 'late'
 }
 
 // The moment a student actually arrived. Attendance is judged on this, never on when the teacher
-// got round to admitting them: a manual waiting room must not mark an on-time student late just
-// because the teacher was slow to click Admit. Rejoining keeps joinedAt/admittedAt, so a network
+// got round to admitting them: a waiting room must not mark an on-time student late just because
+// the teacher was slow to click Admit. Rejoining keeps joinedAt/admittedAt, so a network
 // disconnect cannot shift the classification either.
 export function attendanceReferenceTime({ member = null, at = new Date() } = {}) {
   return (
@@ -106,34 +113,26 @@ export function attendanceForMember({ room, member, at = new Date() }) {
   return computeAttendanceStatus({ room, at: attendanceReferenceTime({ member, at }) })
 }
 
-// A very-late arrival is admitted but watch-only: they see the video and nothing else (no polls,
-// no answers, no leaderboard). Enforced server-side by routing them to the viewers channel and
-// refusing their responses/leaderboard reads, not just hidden in the UI.
-export function isWatchOnly({ admitted, attendanceStatus }) {
-  return !!admitted && attendanceStatus === 'very_late'
-}
-
 const spText = (n) => `${n} SP`
 
-function joinNotification({ room, state, enabled, policy, attendanceStatus, arrivalStatus }) {
+function joinNotification({ room, state, enabled, attendanceStatus, arrivalStatus }) {
   if (state === 'rejected') return 'Your request to join this room was declined by the teacher.'
   if (state === 'waiting') {
-    if (arrivalStatus === 'very_late') {
-      return 'You joined very late, so your teacher needs to approve your entry. You can watch the video once admitted.'
-    }
-    return policy === 'manual'
-      ? 'You are in the waiting room. Your teacher will admit you shortly.'
-      : 'Waiting for the room to admit you.'
+    // Every enabled room parks new students here, automatic or manual. The copy is intentionally
+    // the same in both policies: the student is held until the teacher (or Admit All) lets them in.
+    return 'We have let the host know you are in the meeting. Keep this tab open and you will join automatically.'
   }
-  // Consequences mirror attendanceLedger.penaltyForStatus (late 1x, very late 2x) and its 3-strike rule.
+  // Consequences mirror attendanceLedger.penaltyForStatus (late 1x) and its 3-strike rule.
   const { scheduledStartAt, latePenaltySp } = getAttendanceSettings(room)
   if (attendanceStatus === 'late') {
     const cost = latePenaltySp > 0 ? ` and costs ${spText(latePenaltySp)}` : ''
     return `You joined late. This is recorded in your attendance${cost}. Every 3rd late arrival in a row also counts as a strike.`
   }
-  if (attendanceStatus === 'very_late') {
-    const cost = latePenaltySp > 0 ? ` It is recorded as very late and costs ${spText(latePenaltySp * 2)}.` : ' It is recorded as very late in your attendance.'
-    return `You joined very late, so you can only watch the video in this session. Polls and the leaderboard are not available to you.${cost}`
+  if (arrivalStatus === 'late') {
+    // Automatic Admit All only admits on-time arrivals, so an admitted late student normally came
+    // through an individual manual admit. Keep the notice accurate for that path.
+    const cost = latePenaltySp > 0 ? ` and costs ${spText(latePenaltySp)}` : ''
+    return `You joined late. This is recorded in your attendance${cost}.`
   }
   if (scheduledStartAt) return 'You joined on time. You can take part in every poll.'
   return enabled ? 'You are in the room.' : ''
@@ -142,16 +141,16 @@ function joinNotification({ room, state, enabled, policy, attendanceStatus, arri
 // Decide what a student's state should be RIGHT NOW.
 //
 // Returns:
-//   { enabled, policy, state, admitted, waitingRoom, watchOnly, attendanceStatus, lateMinutes, notification }
+//   { enabled, policy, state, admitted, waitingRoom, arrivalStatus, attendanceStatus, lateMinutes,
+//     notification }
 //
-// `state` is the persisted admission state ('admitted' | 'waiting' | 'rejected'); `waitingRoom`
-// is true whenever the student is not currently a live participant (the field the clients use to
-// switch into watch-only mode).
+// `state` is the persisted admission state ('admitted' | 'waiting' | 'rejected'); `waitingRoom` is
+// true whenever the waiting room is enabled and the student is not currently a live participant.
 //
 // Admission policy (only when the waiting room is enabled):
-//   automatic -> everyone is admitted on join (very-late arrivals are watch-only).
-//   manual    -> on-time AND late arrivals are admitted automatically (the late notice explains the
-//                penalty); only very-late arrivals wait for the teacher's approval.
+//   automatic -> every join waits; the teacher's first Admit All admits on-time students and turns
+//                the policy manual.
+//   manual    -> every join waits for an individual decision or a filtered Admit All.
 export function evaluateJoin({ room, member = null, at = new Date() }) {
   const enabled = isWaitingRoomEnabled(room)
   const policy = getWaitingPolicy(room)
@@ -159,7 +158,6 @@ export function evaluateJoin({ room, member = null, at = new Date() }) {
   // Classification for the moment the student actually arrived. Drives both the admission decision
   // and (via attendanceForMember) the stamped outcome.
   const arrivalStatus = computeAttendanceStatus({ room, at: attendanceReferenceTime({ member, at }) })
-  const needsApproval = arrivalStatus === 'very_late' && policy === 'manual'
 
   let state
   if (!enabled) {
@@ -169,26 +167,13 @@ export function evaluateJoin({ room, member = null, at = new Date() }) {
   } else if (stored === 'admitted') {
     state = 'admitted'
   } else if (stored === 'waiting') {
-    // Keep genuinely very-late arrivals waiting in manual rooms. Anything else (automatic rooms, or
-    // a row parked by an older build) is promoted on the next join.
-    state = needsApproval ? 'waiting' : 'admitted'
+    // Everyone waits until the teacher acts. A reconnect must not promote a waiting student.
+    state = 'waiting'
   } else if (member) {
     // Legacy membership row (field absent) predates the waiting room: treat as admitted.
     state = 'admitted'
   } else {
-    state = needsApproval ? 'waiting' : 'admitted'
-  }
-
-  // Late-join hard stop: only applies when the teacher disabled late joining. An already-admitted
-  // student is never retroactively kicked by changing the setting mid-session. Judge the cutoff
-  // against the arrival time so a slow approval cannot reject a student who arrived in time.
-  if (state === 'admitted' && enabled && room?.settings?.allowLateJoin === false && stored !== 'admitted') {
-    const { scheduledStartAt, graceMinutes, lateWindowMinutes } = getAttendanceSettings(room)
-    if (scheduledStartAt) {
-      const cutoff = scheduledStartAt.getTime() + (graceMinutes + lateWindowMinutes) * 60000
-      const when = attendanceReferenceTime({ member, at })
-      if (when.getTime() > cutoff) state = 'rejected'
-    }
+    state = 'waiting'
   }
 
   const admitted = state === 'admitted'
@@ -203,10 +188,10 @@ export function evaluateJoin({ room, member = null, at = new Date() }) {
     state,
     admitted,
     waitingRoom: enabled ? !admitted : false,
-    watchOnly: isWatchOnly({ admitted, attendanceStatus }),
+    arrivalStatus,
     attendanceStatus,
     lateMinutes,
-    notification: joinNotification({ room, state, enabled, policy, attendanceStatus, arrivalStatus })
+    notification: joinNotification({ room, state, enabled, attendanceStatus, arrivalStatus })
   }
 }
 
@@ -250,7 +235,7 @@ export async function ensureRoomMember({ room, studentId, at = new Date() }) {
   // attendance, so the student walks straight back into the state they left.
   if (member.leftAt) patch.leftAt = null
 
-  // Auto-promote (automatic policy, or the teacher just turned the waiting room off).
+  // Auto-promote (the teacher just turned the waiting room off).
   if (evaluation.state === 'admitted' && member.admissionStatus !== 'admitted') {
     patch.admissionStatus = 'admitted'
     // Arrival time, not "right now": a slow manual approval must not turn an on-time student late.
@@ -299,8 +284,8 @@ export async function admitRoomMember({ room, studentId, admittedBy = null, at =
   return { member, evaluation: evaluateJoin({ room, member, at: now }) }
 }
 
-// Teacher rejects a waiting student. They stay connected in the viewers channel (watch-only) but
-// can never post responses; the ledger marks the attempt 'excused' (0 penalty).
+// Teacher rejects a waiting student. They stay connected in the viewers channel but can never post
+// responses; the ledger marks the attempt 'excused' (0 penalty).
 export async function rejectRoomMember({ room, studentId, rejectedBy = null, at = new Date() }) {
   const now = toDate(at) || new Date()
   const member = await RoomMember.findOneAndUpdate(
@@ -319,11 +304,120 @@ export async function rejectRoomMember({ room, studentId, rejectedBy = null, at 
   return { member, evaluation: evaluateJoin({ room, member, at: now }) }
 }
 
+// Admit every waiting student the teacher asked for.
+//
+//   automatic -> ignores the supplied IDs: admits only students whose ARRIVAL was on_time, in join
+//                order, then persists waitingRoomPolicy: 'manual' so everyone who arrives later
+//                keeps waiting for an explicit decision.
+//   manual    -> admits exactly the supplied IDs (the currently visible/filtered lobby rows). If no
+//                IDs are supplied, admits the whole waiting list.
+//
+// Returns the admitted members plus the (possibly switched) policy.
+export async function admitWaitingMembers({ room, studentIds = null, admittedBy = null, at = new Date() }) {
+  const now = toDate(at) || new Date()
+  const policy = getWaitingPolicy(room)
+  const ids = Array.isArray(studentIds)
+    ? studentIds.map((id) => String(id)).filter(Boolean)
+    : null
+
+  const query = { roomId: room._id, admissionStatus: 'waiting', leftAt: null }
+  if (policy === 'manual' && ids) query.studentId = { $in: ids }
+
+  const waiting = await RoomMember.find(query).sort({ waitingRequestedAt: 1, joinedAt: 1 })
+  const eligible = policy === 'automatic'
+    ? waiting.filter((member) => computeAttendanceStatus({
+      room,
+      at: attendanceReferenceTime({ member, at: now })
+    }) === 'on_time')
+    : waiting
+
+  const admitted = []
+  for (const member of eligible) {
+    const result = await admitRoomMember({ room, studentId: member.studentId, admittedBy, at: now })
+    if (result) admitted.push(result)
+  }
+
+  let nextPolicy = policy
+  if (policy === 'automatic') {
+    // The first Admit All hands control to the teacher for the rest of this session.
+    await Room.updateOne(
+      { _id: room._id },
+      { $set: { 'settings.waitingRoomPolicy': 'manual' } }
+    )
+    nextPolicy = 'manual'
+  }
+
+  return {
+    admitted,
+    skipped: Math.max(0, waiting.length - admitted.length),
+    policy: nextPolicy,
+    policySwitched: nextPolicy !== policy
+  }
+}
+
+// Attach name/email/enrollment to member rows without a populate() that would null out studentId
+// when a user document no longer exists. Missing profiles keep the raw ObjectId, and the view
+// helpers fall back to 'Student' for the display name.
+async function withStudentProfiles(members) {
+  if (!members.length) return members
+  const ids = [...new Set(members.map((m) => String(m.studentId?._id || m.studentId)).filter(Boolean))]
+  const users = await User.find({ _id: { $in: ids } }).select('name email enrollmentNumber').lean()
+  const byId = new Map(users.map((u) => [String(u._id), u]))
+  return members.map((m) => {
+    const key = String(m.studentId?._id || m.studentId)
+    const profile = byId.get(key)
+    return profile ? { ...m, studentId: profile } : m
+  })
+}
+
 export async function listWaitingMembers(roomId) {
-  return RoomMember.find({ roomId, admissionStatus: 'waiting', leftAt: null })
-    .populate('studentId', 'name email enrollmentNumber')
+  const members = await RoomMember.find({ roomId, admissionStatus: 'waiting', leftAt: null })
     .sort({ waitingRequestedAt: 1, joinedAt: 1 })
     .lean()
+  return withStudentProfiles(members)
+}
+
+// Waiting-list row for the teacher UI. The tag comes from the ARRIVAL time, so it is stable even
+// while the student is still waiting (attendanceStatus itself stays 'pending' until admitted).
+export function waitingMemberView(room, member, { at = new Date() } = {}) {
+  const arrivalAt = attendanceReferenceTime({ member, at })
+  const stamped = member?.attendanceStatus
+  return {
+    studentId: member.studentId?._id || member.studentId,
+    name: member.studentId?.name || 'Student',
+    email: member.studentId?.email || '',
+    enrollmentNumber: member.studentId?.enrollmentNumber || '',
+    requestedAt: member.waitingRequestedAt || member.joinedAt || null,
+    attendanceStatus: stamped && stamped !== 'pending'
+      ? stamped
+      : computeAttendanceStatus({ room, at: arrivalAt }),
+    lateMinutes: computeLateMinutes({ room, at: arrivalAt })
+  }
+}
+
+// Admitted students only, in join order, for the clickable participants list. Waiting and rejected
+// students are deliberately excluded.
+export async function listParticipantMembers(roomId) {
+  const members = await RoomMember.find({
+    roomId,
+    leftAt: null,
+    $or: [{ admissionStatus: 'admitted' }, { admissionStatus: { $exists: false } }, { admissionStatus: null }]
+  })
+    .sort({ joinedAt: 1, admittedAt: 1 })
+    .lean()
+  return withStudentProfiles(members)
+}
+
+export function participantView(room, member, { at = new Date() } = {}) {
+  return {
+    studentId: member.studentId?._id || member.studentId,
+    name: member.studentId?.name || 'Student',
+    email: member.studentId?.email || '',
+    enrollmentNumber: member.studentId?.enrollmentNumber || '',
+    joinedAt: member.joinedAt || null,
+    admittedAt: member.admittedAt || member.joinedAt || null,
+    attendanceStatus: attendanceForMember({ room, member, at })
+  }
 }
 
 export async function countParticipants(roomId) {

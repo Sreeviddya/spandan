@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-10-31 — ✅ Hold-all waiting room, Admit All, local-only SP/attendance
+
+**Changed (supersedes the late-window and Spurti-mirror notes below):**
+
+- **The waiting room now holds every student.** With the waiting room enabled, both Automatic and
+  Manual policies park each new arrival in the lobby with the message *"We have let the host know
+  you are in the meeting."* Arrival time still decides the attendance tag (`on_time` / `late`);
+  the teacher's approval speed never changes it.
+- **Automatic → first Admit All.** Automatic mode's first **Admit All** admits only the students
+  whose arrival was on time, in join order, then persists `waitingRoomPolicy: 'manual'` for the
+  rest of that room/session. Later arrivals keep waiting for an explicit decision.
+- **Manual → filtered Admit All.** Every student waits. The lobby shows an **On time / Late** tag
+  and lets the teacher filter the list; **Admit All** sends the currently visible/filtered student
+  IDs and admits only those.
+- **Participants count opens a list.** Clicking the participant count shows admitted students in
+  join order (waiting/rejected excluded), with on-time/late tags and join times.
+- **Removed `very_late` and watch-only mode.** Attendance outcomes are now `pending | on_time |
+  late | absent | excused`. The late-window timer and the `allowLateJoin` setting are gone; late
+  costs 1× the SP penalty, absent 3×, and every 3rd consecutive late is a strike.
+- **Removed the Spurti mirror.** SP and attendance are local to Spandan again; the
+  `spurtiLive` service, its boot log, tests and env vars were deleted, and the dashboard card no
+  longer shows a mirror badge.
+- Kept the subtle teacher chime and its per-room `waitingRoomChime` toggle, firing only on the
+  transition into the waiting room.
+
+**Tests:** backend suites cover the hold-all policy, automatic/manual Admit All, participant
+listing and local settlement; frontend card/lobby tests updated. Production build passes.
+
+---
+
 ## 2026-10-30 — ✅ Subtle waiting-room chime for teachers
 
 **Added:**

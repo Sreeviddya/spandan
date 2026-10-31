@@ -21,12 +21,11 @@ import { Ico } from '../components/icons'
 // delay in [0, this) before navigating. Scoring is unaffected — the session is already over.
 const RESULTS_NAV_JITTER_MS = 4000
 
-// Join notice shown at the top of the session: on time (green), late (amber), very late (red).
-// The text comes from the server (waitingRoom.joinNotification) so it always matches the room's rules.
+// Join notice shown at the top of the session: on time (green) or late (amber). The text comes
+// from the server (waitingRoom.joinNotification) so it always matches the room's rules.
 const NOTICE_TONES = {
   on_time: { bg: 'var(--tint-success-bg)', fg: 'var(--tint-success-fg)', icon: CircleCheck, title: 'You joined on time' },
-  late: { bg: 'var(--tint-warn-bg)', fg: 'var(--tint-warn-fg)', icon: TriangleAlert, title: 'You joined late' },
-  very_late: { bg: 'var(--tint-danger-bg)', fg: 'var(--tint-danger-fg)', icon: TriangleAlert, title: 'You joined very late' }
+  late: { bg: 'var(--tint-warn-bg)', fg: 'var(--tint-warn-fg)', icon: TriangleAlert, title: 'You joined late' }
 }
 
 function JoinNotice({ status, message, onDismiss }) {
@@ -64,14 +63,11 @@ function StudentRoomPage() {
   const [isLoading, setIsLoading] = useState(true)
   const [error, setError] = useState('')
   // Waiting-room admission state. `admitted === false` means the student is in the lobby (viewers
-  // channel) and must see a watch-only waiting screen rather than the live session. The server also
-  // rejects their responses (403), so this is UI only — never the security boundary.
-  // `watchOnly` marks a very-late arrival: admitted, but they see only the video (the server keeps
-  // them on the viewers channel and refuses their answers/leaderboard reads).
+  // channel) and must see the waiting screen rather than the live session. The server also rejects
+  // their responses (403), so this is UI only — never the security boundary.
   const [joinState, setJoinState] = useState({
     admitted: true,
     waitingRoom: false,
-    watchOnly: false,
     admissionStatus: 'admitted',
     attendanceStatus: 'on_time',
     lateMinutes: 0,
@@ -83,9 +79,8 @@ function StudentRoomPage() {
   // stale value). Used to decide whether a room-end should navigate to results (admitted) or just
   // show "this room has ended" in the lobby (waiting/rejected — they have no results to view).
   const admittedRef = useRef(true)
-  // Watch-only students have no results either, so a room end treats them like the lobby.
-  useEffect(() => { admittedRef.current = joinState.admitted && !joinState.watchOnly }, [joinState.admitted, joinState.watchOnly])
-  // The join notice (on time / late / very late) can be dismissed; a new notification shows again.
+  useEffect(() => { admittedRef.current = joinState.admitted }, [joinState.admitted])
+  // The join notice (on time / late) can be dismissed; a new notification shows again.
   const [noticeDismissed, setNoticeDismissed] = useState(false)
   useEffect(() => { setNoticeDismissed(false) }, [joinState.notification])
   const [currentQuestion, setCurrentQuestion] = useState(null)
@@ -269,7 +264,6 @@ function StudentRoomPage() {
         ...prev,
         admitted: !!data?.admitted,
         waitingRoom: data?.waitingRoom !== false,
-        watchOnly: !!data?.watchOnly,
         admissionStatus: data?.admissionStatus || 'waiting',
         attendanceStatus: data?.attendanceStatus || prev.attendanceStatus,
         notification: data?.notification || prev.notification
@@ -285,7 +279,6 @@ function StudentRoomPage() {
         ...prev,
         admitted: true,
         waitingRoom: false,
-        watchOnly: !!data?.watchOnly,
         admissionStatus: 'admitted',
         attendanceStatus: data?.attendanceStatus || prev.attendanceStatus,
         notification: data?.notification || 'You are now in the room.'
@@ -293,7 +286,7 @@ function StudentRoomPage() {
       // Re-emit room:join so the server relocates this socket from the viewers channel to the
       // participants channel (it alone decides the channel; this is just the trigger).
       if (room?.code && user?._id) joinRoom(room.code, user._id)
-      if (!data?.watchOnly && room?._id && user?._id) fetchPastResponses(room._id, user._id)
+      if (room?._id && user?._id) fetchPastResponses(room._id, user._id)
     }
 
     const handleRejected = (data) => {
@@ -362,7 +355,6 @@ function StudentRoomPage() {
       setJoinState({
         admitted: result.admitted,
         waitingRoom: result.waitingRoom,
-        watchOnly: !!result.watchOnly,
         admissionStatus: result.admissionStatus,
         attendanceStatus: result.attendanceStatus,
         lateMinutes: result.lateMinutes,
@@ -377,7 +369,7 @@ function StudentRoomPage() {
             socket.off('room:joined', handleRoomJoined)
             socket.off('room:waiting', handleRoomWaiting)
             // Still fetch even if timeout - RoomMember should already exist from HTTP join
-            if (result.admitted && !result.watchOnly) fetchPastResponses(roomData._id, user._id)
+            if (result.admitted) fetchPastResponses(roomData._id, user._id)
             resolve()
           }, 3000)
 
@@ -573,8 +565,8 @@ function StudentRoomPage() {
     )
   }
 
-  // Waiting room / rejected: watch-only lobby. The live session UI is never rendered until the
-  // server admits this student (joinState.admitted). Polls/leaderboard are not subscribed to.
+  // Waiting room / rejected: the live session UI is never rendered until the server admits this
+  // student (joinState.admitted). Polls/leaderboard are not subscribed to.
   if (joinState.waitingRoom && !joinState.admitted) {
     const rejected = joinState.admissionStatus === 'rejected'
     return (
@@ -596,7 +588,7 @@ function StudentRoomPage() {
               <p style={{ margin: '0 0 18px', color: 'var(--text-secondary)', fontSize: 14, lineHeight: 1.55 }}>
                 {joinState.notification || (rejected
                   ? 'The teacher did not admit you to this session. You can leave this page.'
-                  : 'Your teacher will admit you shortly. Keep this tab open — you will join automatically.')}
+                  : 'We have let the host know you are in the meeting. Keep this tab open and you will join automatically.')}
               </p>
               {!rejected && (
                 <div style={{ display: 'flex', justifyContent: 'center', gap: 24, margin: '20px 0', padding: '16px 0', borderTop: '1px solid var(--border-color)', borderBottom: '1px solid var(--border-color)' }}>
@@ -623,44 +615,6 @@ function StudentRoomPage() {
                 Leave
               </button>
             </div>
-          </div>
-        </div>
-      </div>
-    )
-  }
-
-  // Very late: admitted but watch-only. Only the video (and a notice) is rendered; polls, past
-  // questions and the leaderboard are never mounted. The server enforces the same restriction.
-  if (joinState.watchOnly) {
-    return (
-      <div style={{ display: 'flex', minHeight: '100vh', background: 'var(--bg-primary)', fontFamily: '"Segoe UI", Tahoma, Geneva, Verdana, sans-serif', width: '100vw', maxWidth: '100vw', overflowX: 'hidden' }}>
-        <Sidebar user={user} />
-        <div style={{ flex: 1, display: 'flex', flexDirection: 'column', marginLeft: 'var(--sidebar-width, 240px)', minWidth: 0, maxWidth: 'calc(100vw - var(--sidebar-width, 240px))', overflowX: 'hidden' }}>
-          <PageHeader isMobile={isMobile} icon={Clapperboard} eyebrow="Watch only" title={room.name} subtitle={<>Code <strong style={{ letterSpacing: '0.1em' }}>{room.code}</strong></>} />
-          <div style={{ flex: 1, padding: isMobile ? '16px' : '32px', width: '100%', boxSizing: 'border-box' }}>
-            <JoinNotice status="very_late" message={joinState.notification || 'You joined very late, so you can only watch the video in this session.'} />
-            <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
-              <button onClick={leaveSession} style={{ padding: '8px 16px', background: '#ef4444', color: 'white', border: '1px solid var(--border-color)', borderRadius: '8px', fontSize: '13px', fontWeight: '600', cursor: 'pointer' }}>
-                Leave
-              </button>
-            </div>
-            {isVideoMode && videoId ? (
-              <div style={{ background: 'var(--bg-card)', borderRadius: 'var(--radius-lg)', padding: isMobile ? '12px' : '16px', boxShadow: 'var(--shadow-md)', border: '1px solid var(--border-color)' }}>
-                <YouTubeVideo
-                  videoId={videoId}
-                  controls={true}
-                  noForwardSeek={true}
-                  seekCeilingRef={teacherVideoTimeRef}
-                  capSuppressUntilRef={capSuppressUntilRef}
-                  playerRef={studentPlayerRef}
-                  onLiveStatus={setIsLiveStream}
-                />
-              </div>
-            ) : (
-              <p style={{ color: 'var(--text-secondary)', fontSize: 14, textAlign: 'center', padding: '24px 0' }}>
-                This session has no video to watch.
-              </p>
-            )}
           </div>
         </div>
       </div>

@@ -19,6 +19,7 @@ import {
   admitRoomMember,
   rejectRoomMember,
   listWaitingMembers,
+  waitingMemberView,
   countParticipants,
   countWaiting,
   participantsChannel,
@@ -617,7 +618,7 @@ io.on('connection', (socket) => {
 
       // Channel routing depends on the waiting-room decision:
       //   participants channel (room.code)           -> live session (polls, leaderboard)
-      //   viewers channel   (viewers:<room.code>)    -> waiting room / rejected (watch-only)
+      //   viewers channel   (viewers:<room.code>)    -> waiting room / rejected (read-only)
       // A student is a participant only when admitted; teachers always join as participants.
       let evaluation = null
       let becameWaiting = false
@@ -628,8 +629,7 @@ io.on('connection', (socket) => {
         becameWaiting = !!ensured.becameWaiting
       }
 
-      // Very-late arrivals are admitted but watch-only, so they also go to the viewers channel.
-      const asViewer = role === 'student' && evaluation && (!evaluation.admitted || evaluation.watchOnly)
+      const asViewer = role === 'student' && evaluation && !evaluation.admitted
       // socket.io rooms are joined by key; leave neither channel before joining the right one so a
       // re-join (e.g. after admit) relocates the socket cleanly.
       socket.leave(participantsChannel(roomCode))
@@ -660,7 +660,7 @@ io.on('connection', (socket) => {
         }
       }
 
-      // Tell a waiting/rejected/watch-only student their current state (drives the lobby UI).
+      // Tell a waiting/rejected student their current state (drives the lobby UI).
       if (asViewer && evaluation) {
         socket.emit('room:waiting', {
           roomCode,
@@ -668,7 +668,7 @@ io.on('connection', (socket) => {
           admissionStatus: evaluation.state,
           admitted: evaluation.admitted,
           waitingRoom: !evaluation.admitted,
-          watchOnly: evaluation.watchOnly,
+          arrivalStatus: evaluation.arrivalStatus,
           attendanceStatus: evaluation.attendanceStatus,
           notification: evaluation.notification
         })
@@ -679,8 +679,7 @@ io.on('connection', (socket) => {
       const vp = videoProgress.get(roomCode)
       if (vp) socket.emit('video:progress', { time: vp.time, playing: vp.playing })
       // If the teacher's question popup is currently open, a late-joining student must start paused.
-      // Watch-only students have no polls, so their video is never held for one.
-      if (videoPaused.get(roomCode) && !evaluation?.watchOnly) socket.emit('video:pause')
+      if (videoPaused.get(roomCode)) socket.emit('video:pause')
     } catch (error) {
       console.error('Error in room:join:', error)
       socket.emit('room:error', { error: 'Failed to join room' })
@@ -695,12 +694,7 @@ io.on('connection', (socket) => {
       const waiting = await listWaitingMembers(room._id)
       socket.emit('waiting:list', {
         roomCode,
-        waiting: waiting.map((m) => ({
-          studentId: m.studentId?._id || m.studentId,
-          name: m.studentId?.name || 'Student',
-          email: m.studentId?.email || '',
-          requestedAt: m.waitingRequestedAt || m.joinedAt
-        })),
+        waiting: waiting.map((m) => waitingMemberView(room, m)),
         participants: await countParticipants(room._id)
       })
     } catch (e) { /* non-fatal */ }
@@ -719,7 +713,6 @@ io.on('connection', (socket) => {
         roomCode,
         roomId: room._id,
         attendanceStatus: result.evaluation.attendanceStatus,
-        watchOnly: result.evaluation.watchOnly,
         notification: result.evaluation.notification || 'Your teacher admitted you. You are now in the room.'
       })
       const [participants, waiting] = await Promise.all([countParticipants(room._id), countWaiting(room._id)])
@@ -768,8 +761,8 @@ io.on('connection', (socket) => {
       if (room) {
         if (role === 'student' && userId) {
           // Keep the row: marking it left preserves the original joinedAt/admittedAt/attendance so
-          // a rejoin restores the same admission instead of re-evaluating (and possibly marking a
-          // network reconnect as very late or parking them back in the lobby).
+          // a rejoin restores the same admission instead of re-evaluating (and possibly parking a
+          // network reconnect back behind a fresh arrival time).
           await RoomMember.updateOne(
             { roomId: room._id, studentId: userId },
             { $set: { leftAt: new Date() } }
@@ -915,10 +908,6 @@ const startServer = async () => {
   httpServer.listen(PORT, () => {
     console.log(`Spandan backend v0.5 running on port ${PORT}`)
     console.log(`Environment: ${process.env.NODE_ENV || 'development'}`)
-    // One line so it is obvious whether SP/attendance will mirror Samagama or use local data.
-    import('./services/spurtiLive.js')
-      .then(({ describeSpurti }) => console.log(`[spurti] ${describeSpurti()}`))
-      .catch(() => {})
   })
 }
 

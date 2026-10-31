@@ -161,7 +161,7 @@ export const useRoomStore = create((set, get) => ({
   },
 
   // Enriched join. The API now returns the room PLUS the waiting-room decision:
-  //   { room, admitted, waitingRoom, watchOnly, admissionStatus, attendanceStatus, lateMinutes,
+  //   { room, admitted, waitingRoom, admissionStatus, attendanceStatus, lateMinutes,
   //     waitingRoomEnabled, policy, notification, attendance }
   // Callers must read `result.room` (previously this resolved to the bare room). `waitingRoom` is
   // true whenever the student is not yet a live participant (still waiting, or rejected).
@@ -189,7 +189,6 @@ export const useRoomStore = create((set, get) => ({
         room: data.room,
         admitted: data.admitted !== false,
         waitingRoom: !!data.waitingRoom,
-        watchOnly: !!data.watchOnly,
         admissionStatus: data.admissionStatus || 'admitted',
         attendanceStatus: data.attendanceStatus || 'on_time',
         lateMinutes: data.lateMinutes || 0,
@@ -227,6 +226,33 @@ export const useRoomStore = create((set, get) => ({
     })
     const data = await response.json()
     if (!response.ok) throw new Error(data.error || `Failed to ${action} student`)
+    return data
+  },
+
+  // Teacher: Admit All. Manual sends the currently visible/filtered IDs; automatic sends none and
+  // the backend admits only on-time arrivals, then switches the room to manual for this session.
+  admitAllWaiting: async (roomId, studentIds = null) => {
+    const { authToken } = get()
+    if (!authToken) throw new Error('Not authenticated')
+    const response = await fetch(`${API_URL}/rooms/${roomId}/waiting/admit-all`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(Array.isArray(studentIds) ? { studentIds } : {})
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || 'Failed to admit students')
+    return data
+  },
+
+  // Teacher: admitted students in join order (clickable Participants count).
+  fetchParticipants: async (roomId) => {
+    const { authToken } = get()
+    if (!authToken) throw new Error('Not authenticated')
+    const response = await fetch(`${API_URL}/rooms/${roomId}/participants`, {
+      headers: { Authorization: `Bearer ${authToken}`, 'Content-Type': 'application/json' }
+    })
+    const data = await response.json()
+    if (!response.ok) throw new Error(data.error || 'Failed to fetch participants')
     return data
   },
 

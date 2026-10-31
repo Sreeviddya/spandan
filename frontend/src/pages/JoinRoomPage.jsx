@@ -41,7 +41,7 @@ function JoinRoomPage() {
       setJoinedRoom(result.room)
       joinRoom(result.room.code, user._id)
       // The session page itself renders the waiting lobby when admission hasn't happened yet, so we
-      // always navigate there; `result.admitted` tells it to show watch-only mode immediately.
+      // always navigate there; `result.admitted` tells it to show the live session immediately.
       navigate(`/student/session/${result.room.code}`)
     } catch (err) {
       setError(err.message || 'Failed to join room. Please check the code and try again.')

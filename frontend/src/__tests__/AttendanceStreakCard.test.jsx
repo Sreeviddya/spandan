@@ -67,36 +67,23 @@ describe('AttendanceStreakCard', () => {
     expect(screen.queryByText(/above the 3,600 min mark/)).not.toBeInTheDocument()
   })
 
-  it('labels mirrored Spurti balances and keeps the local streak separate', () => {
+  it('shows local SP and attendance balances without a mirror label', () => {
     render(<AttendanceStreakCard attendance={summary(1, {
-      source: 'spurti',
       spBalance: 640,
       attendanceMinutes: 1500,
       attendanceTargetMinutes: 3600,
       averageSp: 123
     })} />)
-    expect(screen.getByText(/Live from Spurti/)).toBeInTheDocument()
     expect(screen.getByText('640 SP')).toBeInTheDocument()
     expect(screen.getByText('1,500 / 3,600')).toBeInTheDocument()
-    expect(screen.getByText(/late-streak record stays local to Spandan/)).toBeInTheDocument()
+    expect(screen.queryByText(/Spurti/)).not.toBeInTheDocument()
+    expect(screen.queryByText('Local data')).not.toBeInTheDocument()
     expect(screen.queryByText(/SP per attended session/)).not.toBeInTheDocument()
   })
 
-  it('does not show the Spurti label for local balances', () => {
-    render(<AttendanceStreakCard attendance={summary(0, { source: 'local' })} />)
-    expect(screen.queryByText(/Live from Spurti/)).not.toBeInTheDocument()
-  })
-
-  it('says "Local data" when the Samagama mirror is not in use', () => {
-    render(<AttendanceStreakCard attendance={summary(0, { source: 'local', spBalance: 980 })} />)
-    expect(screen.getByText('Local data')).toBeInTheDocument()
-    expect(screen.getByText('980 SP')).toBeInTheDocument()
-  })
-
-  it('does not claim a strike forfeits mirrored Spurti balances', () => {
-    render(<AttendanceStreakCard attendance={summary(3, { source: 'spurti', attendanceMinutes: 2000 })} />)
-    expect(screen.getByText(/Spurti SP and attendance stay read-only/)).toBeInTheDocument()
-    expect(screen.queryByText('Mirrored live from Spurti')).not.toBeInTheDocument()
-    expect(screen.queryByText(/are forfeited/)).not.toBeInTheDocument()
+  it('always explains the local strike consequence', () => {
+    render(<AttendanceStreakCard attendance={summary(3, { attendanceMinutes: 2000 })} />)
+    expect(screen.getByText(/average SP and one day of attendance minutes are forfeited/)).toBeInTheDocument()
+    expect(screen.queryByText(/Spurti/)).not.toBeInTheDocument()
   })
 })

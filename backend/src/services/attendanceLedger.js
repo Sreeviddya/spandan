@@ -7,10 +7,8 @@
 import Room from '../models/Room.js'
 import RoomMember from '../models/RoomMember.js'
 import AttendanceLedger from '../models/AttendanceLedger.js'
-import User from '../models/User.js'
 import { LATE_STATUSES } from './waitingRoom.js'
 import { ensureStanding, settleRoomForStudent, standingSummary } from './studentStanding.js'
-import { fetchLiveStanding } from './spurtiLive.js'
 
 // Every 3rd consecutive late arrival triggers an extra strike penalty on top of the base one.
 export const STRIKE_EVERY = 3
@@ -21,7 +19,6 @@ export function penaltyForStatus({ status, latePenaltySp }) {
   const base = Math.max(0, Number(latePenaltySp) || 0)
   switch (status) {
     case 'late': return base
-    case 'very_late': return base * 2
     case 'absent': return base * 3
     // 'excused' (teacher rejected) and 'on_time' cost nothing.
     default: return 0
@@ -30,9 +27,9 @@ export function penaltyForStatus({ status, latePenaltySp }) {
 
 function resolveFinalStatus(member) {
   const s = member.attendanceStatus
-  if (s === 'on_time' || s === 'late' || s === 'very_late' || s === 'excused' || s === 'absent') return s
-  // Still 'pending' at room end: a waiting-room member who was never admitted is absent; anything
-  // else (a member admitted before attendance stamping existed) counts as on time.
+  if (s === 'on_time' || s === 'late' || s === 'excused' || s === 'absent') return s
+  // Still 'pending' at room end: a member who was never admitted is absent; anything else (a
+  // member admitted before attendance stamping existed) counts as on time.
   return member.admissionStatus === 'waiting' ? 'absent' : 'on_time'
 }
 
@@ -146,7 +143,7 @@ export async function processRoomAttendance(roomId) {
           status,
           joinedAt: member.joinedAt || null,
           admittedAt: member.admittedAt || null,
-          lateMinutes: status === 'late' || status === 'very_late' ? lateMinutes : 0,
+          lateMinutes: status === 'late' ? lateMinutes : 0,
           penaltySp,
           consecutiveLate: strike.consecutiveLate,
           strikeTriggered: strike.strikeTriggered,
@@ -184,12 +181,9 @@ export async function processRoomAttendance(roomId) {
 }
 
 // Student-facing attendance summary: the current late streak and lifetime session counters used
-// by the student dashboard card.
-//
-// SP and attendance minutes are a READ-ONLY MIRROR of Spurti when it is reachable (see
-// services/spurtiLive.js); otherwise they fall back to Spandan's locally settled balances. The
-// late streak, strikes and session counters always come from Spandan's own ledger.
-export async function getStudentAttendanceSummary(studentId, { chatengineToken } = {}) {
+// by the student dashboard card. SP and attendance minutes always come from Spandan's locally
+// settled StudentStanding row; attendance outcomes come from Spandan's own ledger.
+export async function getStudentAttendanceSummary(studentId) {
   const ledgerRows = await AttendanceLedger.find({ studentId }).sort({ createdAt: -1 }).lean()
   const liveRows = await getLiveAttendanceRows(studentId, ledgerRows)
   // Newest first across completed sessions and any in-progress room. Only the streak uses this
@@ -204,7 +198,6 @@ export async function getStudentAttendanceSummary(studentId, { chatengineToken }
   const attended = ledgerRows.filter((r) => r.status !== 'absent').length
   const onTime = ledgerRows.filter((r) => r.status === 'on_time').length
   const lateCount = ledgerRows.filter((r) => LATE_STATUSES.includes(r.status)).length
-  const veryLate = ledgerRows.filter((r) => r.status === 'very_late').length
   const absent = ledgerRows.filter((r) => r.status === 'absent').length
   const totalPenaltySp = ledgerRows.reduce((sum, r) => sum + (r.penaltySp || 0), 0)
 
@@ -213,56 +206,28 @@ export async function getStudentAttendanceSummary(studentId, { chatengineToken }
   // dashboard does not claim a live contribution while the meter reads zero.
   const liveInStreak = rows.slice(0, currentLateStreak).some((r) => r.live)
 
-  const [standing, student] = await Promise.all([
-    ensureStanding(studentId),
-    User.findById(studentId).select('email').lean()
-  ])
+  const standing = await ensureStanding(studentId)
   const localStanding = standingSummary(standing)
-  const mirrored = student?.email
-    ? await fetchLiveStanding(student.email, { chatengineToken })
-    : null
-  // Spurti has no "average SP at risk" figure. Use its balance per attended session as a close
-  // equivalent, and fall back to Spandan's local average when there is nothing to divide by.
-  const liveAverageSp = mirrored && mirrored.sessionsAttended > 0
-    ? Math.round(mirrored.spBalance / mirrored.sessionsAttended)
-    : localStanding.averageSp
-  const spBalance = mirrored ? mirrored.spBalance : localStanding.spBalance
-  const attendanceMinutes = mirrored ? mirrored.attendanceMinutes : localStanding.attendanceMinutes
-  const averageSp = mirrored ? liveAverageSp : localStanding.averageSp
-  const displayedStanding = {
-    ...localStanding,
-    spBalance,
-    attendanceMinutes,
-    averageSp
-  }
 
   return {
     total,
     attended,
     onTime,
     late: lateCount,
-    veryLate,
     absent,
     totalPenaltySp,
     currentLateStreak,
     strikeEvery: STRIKE_EVERY,
     live: liveInStreak,
-    // Spendable balances + the amounts a strike would take.
-    spBalance,
-    attendanceMinutes,
+    // Spendable balances + the amounts a strike would take. Always local to Spandan.
+    spBalance: localStanding.spBalance,
+    attendanceMinutes: localStanding.attendanceMinutes,
     attendanceTargetMinutes: localStanding.attendanceTargetMinutes,
     attendanceDayMinutes: localStanding.attendanceDayMinutes,
-    averageSp,
+    averageSp: localStanding.averageSp,
     sessionsAttended: localStanding.sessionsAttended,
     strikes: localStanding.strikes,
-    // 'spurti' means these balances are mirrored live; 'local' means Spandan's own ledger.
-    source: mirrored ? 'spurti' : 'local',
-    liveSource: mirrored,
-    local: {
-      spBalance: localStanding.spBalance,
-      attendanceMinutes: localStanding.attendanceMinutes
-    },
-    standing: displayedStanding,
+    standing: localStanding,
     recent: rows.slice(0, 5).map((r) => ({
       roomId: r.roomId,
       roomName: r.roomName,

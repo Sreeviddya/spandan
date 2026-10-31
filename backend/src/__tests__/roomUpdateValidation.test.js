@@ -91,7 +91,6 @@ describe('PUT /rooms/:id body (roomUpdateSchema)', () => {
       waitingRoomChime: true,
       scheduledStartAt: new Date().toISOString(),
       graceMinutes: 5,
-      lateWindowMinutes: 15,
       latePenaltySp: 10
     }
 
@@ -100,9 +99,9 @@ describe('PUT /rooms/:id body (roomUpdateSchema)', () => {
       expect(ok({ settings: { ...fullSettings, ...waiting } })).toBe(true)
     })
 
-    it('accepts every dialog extreme (grace 0/120, window 0/240, penalty 0/1000)', () => {
-      expect(ok({ settings: { graceMinutes: 0, lateWindowMinutes: 0, latePenaltySp: 0 } })).toBe(true)
-      expect(ok({ settings: { graceMinutes: 120, lateWindowMinutes: 240, latePenaltySp: 1000 } })).toBe(true)
+    it('accepts every dialog extreme (grace 0/120, penalty 0/1000)', () => {
+      expect(ok({ settings: { graceMinutes: 0, latePenaltySp: 0 } })).toBe(true)
+      expect(ok({ settings: { graceMinutes: 120, latePenaltySp: 1000 } })).toBe(true)
     })
 
     it('accepts a null / ISO / Date scheduledStartAt', () => {
@@ -113,14 +112,13 @@ describe('PUT /rooms/:id body (roomUpdateSchema)', () => {
 
     it('rejects out-of-range values and non-integer penalties', () => {
       expect(ok({ settings: { graceMinutes: 121 } })).toBe(false)
-      expect(ok({ settings: { lateWindowMinutes: 241 } })).toBe(false)
       expect(ok({ settings: { latePenaltySp: 1001 } })).toBe(false)
       expect(ok({ settings: { latePenaltySp: 2.5 } })).toBe(false)
     })
 
-    it('accepts fractional minutes for seconds-level grace / late window', () => {
+    it('accepts fractional grace for seconds-level values', () => {
       expect(ok({ settings: { graceMinutes: 2.5 } })).toBe(true)
-      expect(ok({ settings: { graceMinutes: 0.5, lateWindowMinutes: 1.5 } })).toBe(true)
+      expect(ok({ settings: { graceMinutes: 0.5 } })).toBe(true)
     })
 
     it('rejects an unknown policy and a non-date scheduledStartAt', () => {

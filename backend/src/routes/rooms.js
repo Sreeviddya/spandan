@@ -2,20 +2,23 @@ import express from 'express'
 import { createRoom, getRoomById, getRoomByCode, joinRoomByCode, getRoomsByTeacher, getRoomsByStudent, getActiveRoomsByStudent, updateRoom, deleteRoom } from '../services/roomService.js'
 import { authenticate } from '../middleware/auth.js'
 import { authorize, requireApprovedTeacher } from '../middleware/auth.js'
-import { validate, createRoomSchema, roomUpdateSchema, waitingDecisionSchema } from '../middleware/validation.js'
+import { validate, createRoomSchema, roomUpdateSchema, waitingDecisionSchema, admitAllSchema } from '../middleware/validation.js'
 import { rebuildSnapshot } from '../services/resultsSnapshot.js'
 import { prewarmInsights } from '../services/insightsCache.js'
 import {
   admitRoomMember,
   rejectRoomMember,
+  admitWaitingMembers,
   listWaitingMembers,
+  listParticipantMembers,
+  waitingMemberView,
+  participantView,
   countParticipants,
   countWaiting,
   participantsChannel,
   viewersChannel
 } from '../services/waitingRoom.js'
 import { processRoomAttendance, getStudentAttendanceSummary } from '../services/attendanceLedger.js'
-import { readCookie } from '../services/spurtiLive.js'
 import { invalidateMemberCache } from './responses.js'
 
 const router = express.Router()
@@ -44,7 +47,6 @@ function emitJoinState(io, studentId, room, evaluation) {
     admissionStatus: evaluation.state,
     admitted: evaluation.admitted,
     waitingRoom: evaluation.waitingRoom,
-    watchOnly: evaluation.watchOnly,
     attendanceStatus: evaluation.attendanceStatus,
     notification: evaluation.notification
   })
@@ -147,7 +149,6 @@ router.get('/join/:code', authenticate, authorize('student'), async (req, res) =
       room: payload.room,
       admitted: payload.admitted,
       waitingRoom: payload.waitingRoom,
-      watchOnly: payload.watchOnly,
       admissionStatus: payload.admissionStatus,
       attendanceStatus: payload.attendanceStatus,
       lateMinutes: payload.lateMinutes,
@@ -164,20 +165,19 @@ router.get('/join/:code', authenticate, authorize('student'), async (req, res) =
   }
 })
 
-// Student attendance summary (streak / late-run) for the dashboard + waiting room.
+// Student attendance summary (streak / late-run) for the dashboard + waiting room. SP and
+// attendance minutes are always Spandan's own locally settled standing.
 router.get('/student/attendance', authenticate, authorize('student'), async (req, res) => {
   try {
-    // Forward the Samagama SSO cookie (if the browser has one) so the Spurti mirror can identify
-    // the student when no Spurti admin token is configured.
-    const chatengineToken = readCookie(req.headers.cookie, 'chatengine_token')
-    const summary = await getStudentAttendanceSummary(req.user._id, { chatengineToken })
+    const summary = await getStudentAttendanceSummary(req.user._id)
     res.json({ attendance: summary })
   } catch (error) {
     res.status(500).json({ error: error.message })
   }
 })
 
-// Teacher: the current waiting list (students awaiting a manual admit/reject).
+// Teacher: the current waiting list. Every entry carries the arrival-based on_time/late tag so the
+// lobby can show it before the student is admitted.
 router.get('/:id/waiting', authenticate, authorize('teacher'), requireApprovedTeacher, async (req, res) => {
   try {
     const room = await getRoomById(req.params.id)
@@ -187,15 +187,72 @@ router.get('/:id/waiting', authenticate, authorize('teacher'), requireApprovedTe
     const waiting = await listWaitingMembers(room._id)
     const participants = await countParticipants(room._id)
     res.json({
-      waiting: waiting.map((m) => ({
-        studentId: m.studentId?._id || m.studentId,
-        name: m.studentId?.name || 'Student',
-        email: m.studentId?.email || '',
-        enrollmentNumber: m.studentId?.enrollmentNumber || '',
-        requestedAt: m.waitingRequestedAt || m.joinedAt
-      })),
+      waiting: waiting.map((m) => waitingMemberView(room, m)),
       participants,
       waitingCount: waiting.length
+    })
+  } catch (error) {
+    const status = error.message === 'Room not found' ? 404 : 500
+    res.status(status).json({ error: error.message })
+  }
+})
+
+// Teacher: admitted students in join order. Powers the clickable Participants count.
+router.get('/:id/participants', authenticate, authorize('teacher'), requireApprovedTeacher, async (req, res) => {
+  try {
+    const room = await getRoomById(req.params.id)
+    if (room.teacher._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ error: 'Only the room owner can view participants' })
+    }
+    const members = await listParticipantMembers(room._id)
+    res.json({
+      participants: members.map((m) => participantView(room, m)),
+      count: members.length
+    })
+  } catch (error) {
+    const status = error.message === 'Room not found' ? 404 : 500
+    res.status(status).json({ error: error.message })
+  }
+})
+
+// Teacher: Admit All.
+//   automatic -> admits on-time arrivals in join order and switches the room to manual.
+//   manual    -> admits exactly the supplied (currently visible/filtered) student IDs.
+router.post('/:id/waiting/admit-all', authenticate, authorize('teacher'), requireApprovedTeacher, validate(admitAllSchema), async (req, res) => {
+  try {
+    const room = await getRoomById(req.params.id)
+    if (room.teacher._id.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ error: 'Only the room owner can admit students' })
+    }
+
+    const result = await admitWaitingMembers({
+      room,
+      studentIds: req.validatedBody?.studentIds || null,
+      admittedBy: req.user._id
+    })
+
+    const io = req.app.get('io')
+    for (const admitted of result.admitted) {
+      const studentId = admitted.member?.studentId
+      if (io && studentId) {
+        io.to('user:' + studentId).emit('room:admitted', {
+          roomCode: room.code,
+          roomId: room._id,
+          attendanceStatus: admitted.evaluation.attendanceStatus,
+          notification: 'Your teacher admitted you. You are now in the room.'
+        })
+        emitJoinState(io, studentId, room, admitted.evaluation)
+      }
+    }
+    await broadcastLobby(io, room)
+
+    res.json({
+      message: `${result.admitted.length} student${result.admitted.length === 1 ? '' : 's'} admitted`,
+      admitted: result.admitted.map((a) => String(a.member?.studentId)),
+      admittedCount: result.admitted.length,
+      skipped: result.skipped,
+      policy: result.policy,
+      policySwitched: result.policySwitched
     })
   } catch (error) {
     const status = error.message === 'Room not found' ? 404 : 500
@@ -230,8 +287,8 @@ router.post('/:id/waiting/:studentId/admit', authenticate, authorize('teacher'),
   }
 })
 
-// Teacher: reject a waiting student. They remain connected in the viewers channel (watch-only) but
-// can never submit responses; the ledger records the attempt as 'excused'.
+// Teacher: reject a waiting student. They remain connected in the viewers channel but can never
+// submit responses; the ledger records the attempt as 'excused'.
 router.post('/:id/waiting/:studentId/reject', authenticate, authorize('teacher'), requireApprovedTeacher, validate(waitingDecisionSchema), async (req, res) => {
   try {
     const room = await getRoomById(req.params.id)

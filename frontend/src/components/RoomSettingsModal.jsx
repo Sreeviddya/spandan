@@ -16,15 +16,14 @@ const clampSegmentTime = (v) => {
 
 // Waiting room / attendance input bounds — must match backend/src/middleware/validation.js.
 const GRACE_MIN = 0, GRACE_MAX = 120, GRACE_DEFAULT = 5
-const LATE_WINDOW_MIN = 0, LATE_WINDOW_MAX = 240, LATE_WINDOW_DEFAULT = 15
 const LATE_PENALTY_MIN = 0, LATE_PENALTY_MAX = 1000, LATE_PENALTY_DEFAULT = 0
 const clampIntInRange = (v, min, max, fallback) => {
   const n = parseInt(v, 10)
   if (Number.isNaN(n)) return fallback
   return Math.min(max, Math.max(min, n))
 }
-// Grace / late window support both minutes and seconds. Minutes remain the canonical stored unit
-// (fractional when seconds are chosen, e.g. 30s = 0.5), so the backend only needs one field.
+// Grace supports both minutes and seconds. Minutes remain the canonical stored unit (fractional
+// when seconds are chosen, e.g. 30s = 0.5), so the backend only needs one field.
 const toUnitValue = (minutes, unit) => {
   const m = Number(minutes)
   if (!Number.isFinite(m)) return 0
@@ -104,14 +103,12 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
   const [providers, setProviders] = useState([])
   const [loadingProviders, setLoadingProviders] = useState(false)
   const [graceUnit, setGraceUnit] = useState('min')
-  const [lateWindowUnit, setLateWindowUnit] = useState('min')
 
   useEffect(() => {
     if (isOpen) {
       // Clamp on open so a room saved under the old list (e.g. 20 or 30 min) shows an in-range value.
       setLocalSettings({ ...settings, segmentTime: clampSegmentTime(settings?.segmentTime) })
       setGraceUnit(unitForValue(settings?.graceMinutes ?? GRACE_DEFAULT))
-      setLateWindowUnit(unitForValue(settings?.lateWindowMinutes ?? LATE_WINDOW_DEFAULT))
       loadProviders()
     }
   }, [isOpen, settings])
@@ -643,8 +640,8 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
             Waiting Room &amp; Attendance
           </h3>
           <p style={{ margin: '0 0 14px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Record late arrivals in the attendance ledger. On-time and late students join straight
-            away; in Manual mode only very-late arrivals wait for your approval.
+            Every student who joins waits for you to admit them. Attendance is judged on when they
+            arrived, not on when you click Admit.
           </p>
 
           <label style={{ display: 'block', marginBottom: '8px', fontSize: '14px', fontWeight: '500', color: 'var(--text-primary)' }}>
@@ -697,8 +694,9 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
                 })}
               </div>
               <p style={{ margin: '-8px 0 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-                Automatic admits students on join; Manual admits on-time and late students
-                automatically and only asks you to approve very-late arrivals.
+                Every new student waits. In Automatic mode, your first Admit All lets in everyone
+                who arrived on time and then switches the room to Manual for the rest of the session.
+                In Manual mode, every student waits for an individual admit or a filtered Admit All.
               </p>
 
               <label style={{ display: 'block', marginBottom: '8px', fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' }}>
@@ -745,7 +743,7 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
             }}
           />
           <p style={{ margin: '-8px 0 16px', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Used to classify on-time / late / very-late. Leave empty to mark everyone on time.
+            Used to classify on-time / late at arrival. Leave empty to mark everyone on time.
           </p>
 
           <div style={{ display: 'flex', gap: '12px', flexWrap: 'wrap' }}>
@@ -766,22 +764,6 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
               />
             </div>
             <div style={{ flex: '1 1 140px' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px', marginBottom: '8px' }}>
-                <label style={{ fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' }}>
-                  Late window ({lateWindowUnit})
-                </label>
-                <UnitToggle value={lateWindowUnit} onChange={setLateWindowUnit} />
-              </div>
-              <DraftNumberInput
-                min={LATE_WINDOW_MIN}
-                max={lateWindowUnit === 'sec' ? LATE_WINDOW_MAX * 60 : LATE_WINDOW_MAX}
-                step={lateWindowUnit === 'sec' ? 1 : 'any'}
-                value={toUnitValue(localSettings.lateWindowMinutes ?? LATE_WINDOW_DEFAULT, lateWindowUnit)}
-                onCommit={(raw) => setLocalSettings(prev => ({ ...prev, lateWindowMinutes: fromUnitValue(raw, lateWindowUnit, LATE_WINDOW_MAX, LATE_WINDOW_DEFAULT) }))}
-                style={{ width: '100%', padding: '10px 12px', borderRadius: '8px', border: '1px solid var(--border-color)', background: 'var(--bg-primary)', color: 'var(--text-primary)', fontSize: '16px', fontWeight: '600', textAlign: 'center', boxSizing: 'border-box' }}
-              />
-            </div>
-            <div style={{ flex: '1 1 140px' }}>
               <label style={{ display: 'block', marginBottom: '8px', fontSize: '13px', fontWeight: '500', color: 'var(--text-primary)' }}>
                 Late penalty (SP)
               </label>
@@ -794,7 +776,7 @@ function RoomSettingsModal({ isOpen, onClose, settings, onSave }) {
             </div>
           </div>
           <p style={{ margin: '8px 0 0', fontSize: '12px', color: 'var(--text-secondary)' }}>
-            Late costs 1×, very late 2×, absent 3× this SP. Every 3rd consecutive late also triggers a strike.
+            Late costs 1× and absent 3× this SP. Every 3rd consecutive late also triggers a strike.
           </p>
             </>
           )}

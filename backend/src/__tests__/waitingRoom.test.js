@@ -31,9 +31,7 @@ const scheduledRoom = (overrides = {}) => ({
     waitingRoomPolicy: 'manual',
     scheduledStartAt: BASE,
     graceMinutes: 5,
-    lateWindowMinutes: 15,
     latePenaltySp: 10,
-    allowLateJoin: true,
     ...overrides
   }
 })
@@ -52,21 +50,18 @@ describe('getAttendanceSettings', () => {
     const s = getAttendanceSettings({})
     expect(s.scheduledStartAt).toBeNull()
     expect(s.graceMinutes).toBe(5)
-    expect(s.lateWindowMinutes).toBe(15)
     expect(s.latePenaltySp).toBe(0)
   })
 
   it('clamps out-of-range values to the schema bounds', () => {
-    const s = getAttendanceSettings({ settings: { graceMinutes: 999, lateWindowMinutes: -3, latePenaltySp: 99999 } })
+    const s = getAttendanceSettings({ settings: { graceMinutes: 999, latePenaltySp: 99999 } })
     expect(s.graceMinutes).toBe(120)
-    expect(s.lateWindowMinutes).toBe(0)
     expect(s.latePenaltySp).toBe(1000)
   })
 
   it('preserves fractional minutes so seconds-level values survive', () => {
-    const s = getAttendanceSettings({ settings: { graceMinutes: 0.5, lateWindowMinutes: 1.5 } })
+    const s = getAttendanceSettings({ settings: { graceMinutes: 0.5 } })
     expect(s.graceMinutes).toBe(0.5)
-    expect(s.lateWindowMinutes).toBe(1.5)
   })
 })
 
@@ -77,13 +72,12 @@ describe('attendance classification', () => {
     expect(computeLateMinutes({ room, at: plus(600) })).toBe(0)
   })
 
-  it('classifies on_time / late / very_late against grace + late window', () => {
+  it('classifies on_time / late against the grace period', () => {
     const room = scheduledRoom()
     expect(computeAttendanceStatus({ room, at: plus(0) })).toBe('on_time')
     expect(computeAttendanceStatus({ room, at: plus(5) })).toBe('on_time') // exactly at grace
     expect(computeAttendanceStatus({ room, at: plus(6) })).toBe('late')
-    expect(computeAttendanceStatus({ room, at: plus(20) })).toBe('late') // exactly at cutoff
-    expect(computeAttendanceStatus({ room, at: plus(21) })).toBe('very_late')
+    expect(computeAttendanceStatus({ room, at: plus(200) })).toBe('late') // no late window any more
   })
 
   it('counts late minutes only after the grace period', () => {
@@ -123,98 +117,50 @@ describe('evaluateJoin', () => {
     expect(e.waitingRoom).toBe(false)
   })
 
-  it('automatic policy admits a brand-new student immediately', () => {
+  it('automatic policy holds every new student in the waiting room', () => {
     const room = scheduledRoom({ waitingRoomPolicy: 'automatic' })
     const e = evaluateJoin({ room, member: null, at: plus(0) })
-    expect(e.state).toBe('admitted')
-    expect(e.waitingRoom).toBe(false)
-  })
-
-  it('manual policy admits an on-time student immediately', () => {
-    const room = scheduledRoom()
-    const e = evaluateJoin({ room, member: null, at: plus(0) })
-    expect(e.state).toBe('admitted')
-    expect(e.waitingRoom).toBe(false)
-    expect(e.attendanceStatus).toBe('on_time')
-    expect(e.notification).toMatch(/on time/i)
-  })
-
-  it('manual policy also admits a late student, with the late notice', () => {
-    const room = scheduledRoom()
-    const e = evaluateJoin({ room, member: null, at: plus(10) })
-    expect(e.state).toBe('admitted')
-    expect(e.waitingRoom).toBe(false)
-    expect(e.attendanceStatus).toBe('late')
-    expect(e.notification).toMatch(/joined late/i)
-    expect(e.notification).toMatch(/10 SP/)
-  })
-
-  it('manual policy sends only a very-late arrival to the waiting room', () => {
-    const room = scheduledRoom()
-    const e = evaluateJoin({ room, member: null, at: plus(21) })
     expect(e.state).toBe('waiting')
     expect(e.admitted).toBe(false)
+    expect(e.waitingRoom).toBe(true)
     expect(e.attendanceStatus).toBe('pending')
-    expect(e.notification).toMatch(/approve/i)
+    expect(e.arrivalStatus).toBe('on_time')
+    expect(e.notification).toMatch(/host know/i)
   })
 
-  it('automatic policy promotes an already-waiting member on the next join', () => {
-    const room = scheduledRoom({ waitingRoomPolicy: 'automatic' })
-    const member = { admissionStatus: 'waiting' }
-    expect(evaluateJoin({ room, member, at: plus(0) }).state).toBe('admitted')
+  it('manual policy also holds on-time and late arrivals', () => {
+    const room = scheduledRoom()
+    const onTime = evaluateJoin({ room, member: null, at: plus(0) })
+    expect(onTime.state).toBe('waiting')
+    expect(onTime.arrivalStatus).toBe('on_time')
+    expect(onTime.notification).toMatch(/host know/i)
+
+    const late = evaluateJoin({ room, member: null, at: plus(10) })
+    expect(late.state).toBe('waiting')
+    expect(late.arrivalStatus).toBe('late')
+    expect(late.notification).toMatch(/host know/i)
   })
 
-  it('promoting a waiting student later still judges attendance from when they arrived', () => {
-    // Student asked to join on time, the teacher only switched the room to automatic 50 minutes later.
-    const room = scheduledRoom({ waitingRoomPolicy: 'automatic' })
-    const member = {
-      admissionStatus: 'waiting',
-      attendanceStatus: 'pending',
-      waitingRequestedAt: plus(1),
-      joinedAt: plus(1)
-    }
-    expect(evaluateJoin({ room, member, at: plus(50) }).attendanceStatus).toBe('on_time')
+  it('a stored waiting member stays waiting under both policies', () => {
+    const waiting = { admissionStatus: 'waiting', waitingRequestedAt: plus(1), joinedAt: plus(1) }
+    expect(evaluateJoin({ room: scheduledRoom({ waitingRoomPolicy: 'automatic' }), member: waiting, at: plus(40) }).state).toBe('waiting')
+    expect(evaluateJoin({ room: scheduledRoom(), member: waiting, at: plus(40) }).state).toBe('waiting')
   })
 
-  it('a student who left and rejoins stays admitted with the original outcome', () => {
-    const room = scheduledRoom() // manual policy
+  it('an admitted student keeps the original outcome on a late rejoin', () => {
+    const room = scheduledRoom()
     const member = {
       admissionStatus: 'admitted',
       attendanceStatus: 'on_time',
       joinedAt: plus(0),
       admittedAt: plus(0),
-      leftAt: plus(12) // they navigated away / disconnected and came back later
+      leftAt: plus(12)
     }
     const e = evaluateJoin({ room, member, at: plus(90) })
     expect(e.state).toBe('admitted')
     expect(e.admitted).toBe(true)
     expect(e.attendanceStatus).toBe('on_time')
-    expect(e.watchOnly).toBe(false)
     expect(e.lateMinutes).toBe(0)
-  })
-
-  it('manual policy keeps a very-late waiting member waiting', () => {
-    const room = scheduledRoom()
-    const member = {
-      admissionStatus: 'waiting',
-      attendanceStatus: 'pending',
-      waitingRequestedAt: plus(21),
-      joinedAt: plus(21)
-    }
-    expect(evaluateJoin({ room, member, at: plus(40) }).state).toBe('waiting')
-  })
-
-  it('manual policy promotes a waiting member who actually arrived on time', () => {
-    const room = scheduledRoom()
-    const member = {
-      admissionStatus: 'waiting',
-      attendanceStatus: 'pending',
-      waitingRequestedAt: plus(0),
-      joinedAt: plus(0)
-    }
-    const e = evaluateJoin({ room, member, at: plus(40) })
-    expect(e.state).toBe('admitted')
-    expect(e.attendanceStatus).toBe('on_time')
   })
 
   it('a legacy membership row (no admissionStatus) counts as admitted', () => {
@@ -231,52 +177,21 @@ describe('evaluateJoin', () => {
     expect(e.waitingRoom).toBe(true)
   })
 
-  it('late-join hard stop rejects a NEW student past grace+late window when allowLateJoin is false', () => {
-    const room = scheduledRoom({ waitingRoomPolicy: 'automatic', allowLateJoin: false })
-    expect(evaluateJoin({ room, member: null, at: plus(20) }).state).toBe('admitted') // exactly at cutoff
-    expect(evaluateJoin({ room, member: null, at: plus(21) }).state).toBe('rejected')  // past cutoff
-  })
-
-  it('the hard stop never kicks an already-admitted student', () => {
-    const room = scheduledRoom({ waitingRoomPolicy: 'automatic', allowLateJoin: false })
-    const member = { admissionStatus: 'admitted', attendanceStatus: 'late' }
-    expect(evaluateJoin({ room, member, at: plus(120) }).state).toBe('admitted')
-  })
-
-  it('a very-late arrival is admitted but watch-only, and told so', () => {
-    const room = scheduledRoom({ waitingRoomPolicy: 'automatic' })
-    const e = evaluateJoin({ room, member: null, at: plus(21) })
-    expect(e.admitted).toBe(true)
-    expect(e.attendanceStatus).toBe('very_late')
-    expect(e.watchOnly).toBe(true)
-    expect(e.notification).toMatch(/only watch the video/i)
-    expect(e.notification).toMatch(/20 SP/) // very late = 2x the 10 SP penalty
-  })
-
-  it('on-time and late arrivals are not watch-only and get their own notice', () => {
-    const room = scheduledRoom({ waitingRoomPolicy: 'automatic' })
-    const onTime = evaluateJoin({ room, member: null, at: plus(0) })
-    expect(onTime.watchOnly).toBe(false)
+  it('admitted on-time and late students get their own notice', () => {
+    const room = scheduledRoom()
+    const onTime = evaluateJoin({ room, member: { admissionStatus: 'admitted', attendanceStatus: 'on_time' }, at: plus(0) })
     expect(onTime.notification).toMatch(/on time/i)
-    const late = evaluateJoin({ room, member: null, at: plus(10) })
-    expect(late.watchOnly).toBe(false)
+    const late = evaluateJoin({ room, member: { admissionStatus: 'admitted', attendanceStatus: 'late' }, at: plus(10) })
     expect(late.notification).toMatch(/joined late/i)
     expect(late.notification).toMatch(/10 SP/)
     expect(late.notification).toMatch(/strike/i)
   })
-
-  it('a waiting or rejected student is never flagged watch-only', () => {
-    const room = scheduledRoom()
-    expect(evaluateJoin({ room, member: null, at: plus(60) }).watchOnly).toBe(false)
-    expect(evaluateJoin({ room, member: { admissionStatus: 'rejected' }, at: plus(60) }).watchOnly).toBe(false)
-  })
 })
 
 describe('attendanceLedger pure helpers', () => {
-  it('penalises late 1x, very_late 2x, absent 3x, and nothing for on_time/excused', () => {
+  it('penalises late 1x, absent 3x, and nothing for on_time/excused', () => {
     expect(penaltyForStatus({ status: 'on_time', latePenaltySp: 10 })).toBe(0)
     expect(penaltyForStatus({ status: 'late', latePenaltySp: 10 })).toBe(10)
-    expect(penaltyForStatus({ status: 'very_late', latePenaltySp: 10 })).toBe(20)
     expect(penaltyForStatus({ status: 'absent', latePenaltySp: 10 })).toBe(30)
     expect(penaltyForStatus({ status: 'excused', latePenaltySp: 10 })).toBe(0)
     // Negative/garbage penalty is treated as 0.
@@ -290,7 +205,7 @@ describe('attendanceLedger pure helpers', () => {
 
   it(`triggers a strike on every ${STRIKE_EVERY}rd consecutive late arrival`, () => {
     expect(computeStrike({ priorLateRun: 0, status: 'late' })).toEqual({ consecutiveLate: 1, strikeTriggered: false })
-    expect(computeStrike({ priorLateRun: 1, status: 'very_late' })).toEqual({ consecutiveLate: 2, strikeTriggered: false })
+    expect(computeStrike({ priorLateRun: 1, status: 'late' })).toEqual({ consecutiveLate: 2, strikeTriggered: false })
     expect(computeStrike({ priorLateRun: 2, status: 'late' })).toEqual({ consecutiveLate: 3, strikeTriggered: true })
     expect(computeStrike({ priorLateRun: 5, status: 'late' })).toEqual({ consecutiveLate: 6, strikeTriggered: true })
   })
@@ -298,7 +213,7 @@ describe('attendanceLedger pure helpers', () => {
   it('counts the live late run from the newest rows, including in-progress rooms', () => {
     const rows = [
       { status: 'late', live: true },          // current room, newest
-      { status: 'very_late' },                 // completed room
+      { status: 'late' },                      // completed room
       { status: 'late' },                      // completed room
       { status: 'on_time' }                    // stops the run
     ]

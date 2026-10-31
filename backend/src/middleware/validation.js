@@ -45,14 +45,12 @@ const waitingRoomFields = {
   scheduledStartAt: z.union([z.string().datetime(), z.date(), z.null()]).optional(),
   // Fractional minutes are allowed so the UI can offer a seconds mode (e.g. 30s = 0.5).
   graceMinutes: z.number().min(0).max(120).optional(),              // dialog 0-120
-  lateWindowMinutes: z.number().min(0).max(240).optional(),         // dialog 0-240
   latePenaltySp: z.number().int().min(0).max(1000).optional()       // dialog 0-1000
 }
 
 export const createRoomSchema = z.object({
   name: z.string().min(1, 'Room name is required').max(200),
   settings: z.object({
-    allowLateJoin: z.boolean().optional(),
     showResultsImmediately: z.boolean().optional(),
     requireCorrectAnswer: z.boolean().optional(),
     mode: z.enum(['normal', 'video']).optional(),
@@ -66,7 +64,6 @@ export const createRoomSchema = z.object({
 // the dialog's own clamps (RoomSettingsModal.jsx) so a value the UI lets a teacher pick is never
 // rejected here; the schema exists to stop out-of-range values arriving by any other path.
 export const roomSettingsSchema = z.object({
-  allowLateJoin: z.boolean().optional(),
   showResultsImmediately: z.boolean().optional(),
   requireCorrectAnswer: z.boolean().optional(),
   mode: z.enum(['normal', 'video']).optional(),
@@ -91,13 +88,18 @@ export const roomSettingsSchema = z.object({
   waitingRoomChime: z.boolean().optional(),
   scheduledStartAt: z.union([z.string().datetime(), z.date(), z.null()]).optional(),
   graceMinutes: z.number().min(0).max(120).optional(),             // dialog 0-120 (fractional = seconds)
-  lateWindowMinutes: z.number().min(0).max(240).optional(),        // dialog 0-240 (fractional = seconds)
   latePenaltySp: z.number().int().min(0).max(1000).optional()      // dialog 0-1000
 })
 
 // Body of POST /rooms/:id/waiting/:studentId/admit|reject. Optional free-text reason for reject.
 export const waitingDecisionSchema = z.object({
   reason: z.string().max(500).optional()
+})
+
+// Body of POST /rooms/:id/waiting/admit-all. Manual policy sends the currently visible/filtered
+// student IDs; automatic ignores the list and admits only on-time arrivals.
+export const admitAllSchema = z.object({
+  studentIds: z.array(z.string()).optional()
 })
 
 // Body of PUT /rooms/:id. The same route saves settings ({ settings }), edits the video link

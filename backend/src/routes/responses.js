@@ -45,11 +45,9 @@ async function isRoomMember(RoomMember, roomId, studentId) {
   const key = `${roomId}:${studentId}`
   const hit = memberCache.get(key)
   if (hit && hit.expiresAt > Date.now()) return hit.admitted
-  const found = await RoomMember.findOne({ roomId, studentId }).select('admissionStatus attendanceStatus').lean()
-  // Absent admissionStatus predates the waiting room -> admitted. A very-late arrival is admitted
-  // but watch-only, so they are blocked here too.
-  const admitted = !!found && (found.admissionStatus === 'admitted' || found.admissionStatus == null) &&
-    found.attendanceStatus !== 'very_late'
+  const found = await RoomMember.findOne({ roomId, studentId }).select('admissionStatus').lean()
+  // Absent admissionStatus predates the waiting room -> admitted. Waiting/rejected are blocked.
+  const admitted = !!found && (found.admissionStatus === 'admitted' || found.admissionStatus == null)
   if (found) {
     if (memberCache.size > 50000) memberCache.clear() // safe bound: a miss just re-hits the DB
     memberCache.set(key, { admitted, expiresAt: Date.now() + MEMBER_TTL_MS })
@@ -126,7 +124,7 @@ router.post('/', authorize('student'), async (req, res) => {
 
     // Verify student is an ADMITTED member of the room — cached (Fix 4), DB fallback on miss.
     // A waiting-room or rejected student is deliberately NOT admitted and is refused here, so the
-    // watch-only UI is enforced server-side and not merely by the client.
+    // lobby restriction is enforced server-side and not merely by the client.
     const isMember = await isRoomMember(RoomMember, roomId, studentId)
     if (!isMember) {
       return res.status(403).json({ error: 'You are not admitted to this room' })
@@ -540,10 +538,6 @@ router.get('/room/:roomId/student/:studentId', async (req, res) => {
       if (!isMember) {
         return res.status(403).json({ error: 'Not a member of this room' })
       }
-      // Very-late (watch-only) students see the video and nothing else, including past polls.
-      if (isMember.attendanceStatus === 'very_late') {
-        return res.status(403).json({ error: 'You joined very late and can only watch the video' })
-      }
     }
 
     // Ended rooms serve this student's per-question breakdown from the shared snapshot — an O(1)
@@ -789,8 +783,8 @@ router.get('/leaderboard/:roomId', async (req, res) => {
     // Check if student is a member of the room
     const isStudentMember = await RoomMember.findOne({ roomId, studentId: currentUser._id })
     
-    // Deny access if neither. Very-late (watch-only) students may not see the leaderboard either.
-    if (!isTeacher && (!isStudentMember || isStudentMember.attendanceStatus === 'very_late')) {
+    // Deny access if neither.
+    if (!isTeacher && !isStudentMember) {
       return res.status(403).json({ error: 'Not authorized to view this leaderboard' })
     }
 

@@ -21,7 +21,6 @@ export default function AttendanceStreakCard({ attendance, isMobile }) {
   const spBalance = Math.max(0, Number(attendance?.spBalance) || 0)
   const attendanceMinutes = Math.max(0, Number(attendance?.attendanceMinutes) || 0)
   const attendanceTarget = Math.max(1, Number(attendance?.attendanceTargetMinutes) || 3600)
-  const mirrored = attendance?.source === 'spurti'
   const attendancePct = Math.min(100, Math.round((attendanceMinutes / attendanceTarget) * 100))
 
   const title = struck
@@ -31,9 +30,7 @@ export default function AttendanceStreakCard({ attendance, isMobile }) {
       : 'No late arrivals in a row'
 
   const hint = struck
-    ? mirrored
-      ? 'You reached the strike threshold. The strike is logged on your Spandan late-streak record; your Spurti SP and attendance stay read-only.'
-      : 'You reached the strike threshold. When this session ends, your average SP and one day of attendance minutes are forfeited; an on-time arrival starts a fresh run.'
+    ? 'You reached the strike threshold. When this session ends, your average SP and one day of attendance minutes are forfeited; an on-time arrival starts a fresh run.'
     : filled > 0
       ? `${remaining} more consecutive late arrival${remaining === 1 ? '' : 's'} triggers a strike: you lose your average SP and one day of attendance minutes. An on-time arrival resets this streak.`
       : 'Three late arrivals in a row trigger a strike: you lose your average SP and one day of attendance minutes. An on-time arrival keeps this at zero.'
@@ -92,37 +89,14 @@ export default function AttendanceStreakCard({ attendance, isMobile }) {
         hint="Live count of your consecutive late arrivals."
         tint={tint}
         actions={
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-            {mirrored ? (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 999,
-                fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
-                color: '#6366f1', background: 'color-mix(in srgb, #6366f1 12%, transparent)',
-                border: '1px solid color-mix(in srgb, #6366f1 30%, transparent)'
-              }}>
-                <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 999, background: '#6366f1' }} />
-                Live from Spurti
-              </span>
-            ) : (
-              <span style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 999,
-                fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
-                color: 'var(--text-secondary)', background: 'color-mix(in srgb, var(--text-secondary) 10%, transparent)',
-                border: '1px solid color-mix(in srgb, var(--text-secondary) 26%, transparent)'
-              }}>
-                <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 999, background: 'var(--text-secondary)' }} />
-                Local data
-              </span>
-            )}
-            <span style={{
-              display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 999,
-              fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
-              color: tint, background: `color-mix(in srgb, ${tint} 12%, transparent)`,
-              border: `1px solid color-mix(in srgb, ${tint} 30%, transparent)`
-            }}>
-              <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 999, background: tint }} />
-              {struck ? 'Strike' : filled > 0 ? 'At risk' : 'Clear'}
-            </span>
+          <span style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6, padding: '4px 10px', borderRadius: 999,
+            fontSize: 11.5, fontWeight: 700, whiteSpace: 'nowrap',
+            color: tint, background: `color-mix(in srgb, ${tint} 12%, transparent)`,
+            border: `1px solid color-mix(in srgb, ${tint} 30%, transparent)`
+          }}>
+            <span aria-hidden="true" style={{ width: 7, height: 7, borderRadius: 999, background: tint }} />
+            {struck ? 'Strike' : filled > 0 ? 'At risk' : 'Clear'}
           </span>
         }
       />
@@ -188,12 +162,6 @@ export default function AttendanceStreakCard({ attendance, isMobile }) {
           '#0ea5e9'
         )}
       </div>
-
-      {mirrored && (
-        <p style={{ margin: '10px 0 0', fontSize: 11.5, lineHeight: 1.5, color: 'var(--text-secondary)' }}>
-          SP and attendance are mirrored live from Spurti. Your late-streak record stays local to Spandan.
-        </p>
-      )}
     </div>
   )
 }
